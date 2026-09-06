@@ -122,7 +122,10 @@ export async function publishRepositoryFiles(input: {
      */
     const message = error instanceof Error ? error.message : '';
 
-    if (!message.includes('GitHub API 404')) {
+    if (
+      !message.includes('GitHub API 404') &&
+      !message.includes('GitHub API 409')
+    ) {
       throw error;
     }
   }
