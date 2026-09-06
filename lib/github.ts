@@ -94,10 +94,6 @@ export async function publishRepositoryFiles(input: {
   const safeRepo = encodeURIComponent(input.repo);
   const safeBranch = encodeURIComponent(branch);
 
-  /*
-   * A newly-created GitHub repository has no branch/ref yet.
-   * First try the normal existing-branch flow.
-   */
   let baseSha: string | null = null;
   let baseTreeSha: string | null = null;
 
@@ -116,18 +112,123 @@ export async function publishRepositoryFiles(input: {
 
     baseTreeSha = baseCommit.tree.sha;
   } catch (error) {
-    /*
-     * 404 means this is probably an empty/new repository.
-     * We intentionally continue and create the first commit.
-     */
-    const message = error instanceof Error ? error.message : '';
+    const errorMessage =
+      error instanceof Error ? error.message : '';
 
-    if (
-      !message.includes('GitHub API 404') &&
-      !message.includes('GitHub API 409')
-    ) {
+    const isEmptyRepository =
+      errorMessage.includes('GitHub API 409') &&
+      errorMessage.includes('Git Repository is empty');
+
+    const isMissingBranch =
+      errorMessage.includes('GitHub API 404');
+
+    if (!isEmptyRepository && !isMissingBranch) {
       throw error;
     }
+
+    /*
+     * GitHub does not allow the raw Git database API to create
+     * blobs/trees in a completely empty repository.
+     *
+     * Initialize the repository through the Contents API using
+     * the first real project file.
+     */
+    const initializer = input.files.find(
+      (file) => !file.path.startsWith('.github/workflows/')
+    );
+
+    if (!initializer) {
+      throw new Error(
+        'The repository is empty and the project only contains GitHub Actions workflow files.'
+      );
+    }
+
+    const safeInitializerPath = initializer.path
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/');
+
+    const initialized = await githubFetch(
+      `/repos/${safeOwner}/${safeRepo}/contents/${safeInitializerPath}`,
+      input.token,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          message:
+            input.message ||
+            'Initialize repository from Nexa Code AI',
+          content: Buffer.from(
+            initializer.content,
+            'utf8'
+          ).toString('base64'),
+        }),
+      }
+    );
+
+    const initialCommitSha = initialized?.commit?.sha;
+
+    if (!initialCommitSha) {
+      throw new Error(
+        'GitHub initialized the repository but did not return the initial commit SHA.'
+      );
+    }
+
+    /*
+     * If Nexa requested a non-default branch, create it
+     * from the initial commit.
+     */
+    if (branch !== 'main') {
+      let requestedBranchExists = true;
+
+      try {
+        await githubFetch(
+          `/repos/${safeOwner}/${safeRepo}/git/ref/heads/${safeBranch}`,
+          input.token
+        );
+      } catch (branchError) {
+        const branchMessage =
+          branchError instanceof Error
+            ? branchError.message
+            : '';
+
+        if (branchMessage.includes('GitHub API 404')) {
+          requestedBranchExists = false;
+        } else {
+          throw branchError;
+        }
+      }
+
+      if (!requestedBranchExists) {
+        await githubFetch(
+          `/repos/${safeOwner}/${safeRepo}/git/refs`,
+          input.token,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              ref: `refs/heads/${branch}`,
+              sha: initialCommitSha,
+            }),
+          }
+        );
+      }
+    }
+
+    /*
+     * The repository now has a real Git commit.
+     */
+    const ref = await githubFetch(
+      `/repos/${safeOwner}/${safeRepo}/git/ref/heads/${safeBranch}`,
+      input.token
+    );
+
+    baseSha = ref.object.sha;
+
+    const baseCommit = await githubFetch(
+      `/repos/${safeOwner}/${safeRepo}/git/commits/${baseSha}`,
+      input.token
+    );
+
+    baseTreeSha = baseCommit.tree.sha;
   }
 
   const treeEntries: Array<{
@@ -200,33 +301,16 @@ export async function publishRepositoryFiles(input: {
     }
   );
 
-  if (baseSha) {
-    await githubFetch(
-      `/repos/${safeOwner}/${safeRepo}/git/refs/heads/${safeBranch}`,
-      input.token,
-      {
-        method: 'PATCH',
-        body: JSON.stringify({
-          sha: commit.sha,
-        }),
-      }
-    );
-  } else {
-    /*
-     * First branch of an empty repository.
-     */
-    await githubFetch(
-      `/repos/${safeOwner}/${safeRepo}/git/refs`,
-      input.token,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          ref: `refs/heads/${branch}`,
-          sha: commit.sha,
-        }),
-      }
-    );
-  }
+  await githubFetch(
+    `/repos/${safeOwner}/${safeRepo}/git/refs/heads/${safeBranch}`,
+    input.token,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        sha: commit.sha,
+      }),
+    }
+  );
 
   return {
     repository: `${input.owner}/${input.repo}`,
