@@ -70,3 +70,21 @@
   .mobile-code .code-pane{height:100%}
   .mobile-files .editor{padding:10px}
 }
+
+/* Mobile workspace menu */
+.mobile-menu-button{display:none}
+.mobile-header-title{display:flex;align-items:center;gap:8px;min-width:0}
+.mobile-menu-backdrop,.mobile-menu{display:none}
+@media(max-width:720px){
+ .mobile-header-title{flex:1;min-width:0}
+ .mobile-menu-button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;height:34px;border:1px solid #2a313b;background:#12161c;color:#e1e6ed;border-radius:7px;font-size:18px;line-height:1}
+ .mobile-menu-backdrop{display:block;position:fixed;inset:0;z-index:40;border:0;background:rgba(0,0,0,.52);padding:0}
+ .mobile-menu{display:flex;position:fixed;left:0;top:0;bottom:0;width:min(86vw,340px);z-index:41;flex-direction:column;background:#0d1015;border-right:1px solid #2a313b;box-shadow:10px 0 30px rgba(0,0,0,.35);padding:14px;overflow:auto}
+ .mobile-menu-head{display:flex;align-items:center;justify-content:space-between;margin:2px 0 16px}
+ .mobile-menu-head strong{font-size:18px}
+ .mobile-menu-head button{width:34px;height:34px;border:1px solid #2a313b;background:#12161c;color:#e1e6ed;border-radius:7px;font-size:22px;line-height:1}
+ .mobile-project-list,.mobile-chat-list{max-height:none;overflow:visible}
+ .mobile-menu .side-action{width:100%}
+ .mobile-menu .logout{margin-top:auto}
+}
+@media(min-width:721px){.mobile-header-title{display:block}}
