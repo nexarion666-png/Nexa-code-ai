@@ -34,3 +34,7 @@ git push origin main
 - Individual current-file download action.
 - Mobile GitHub push/reconnect action using the existing server-side GitHub connection.
 - Installable PWA manifest, service worker, icons, and install prompt.
+
+## Auth/session recovery
+
+The v0.8 snapshot was restored with the latest known Nexa Code AI auth/session fixes: server-side PKCE callback exchange, Supabase SSR cookie propagation, and the Next.js 16 `proxy.ts` session-refresh convention. No automatic code execution/testing is part of the product.
