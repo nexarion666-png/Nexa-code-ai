@@ -52,6 +52,56 @@ export async function POST(req: Request) {
       );
     }
 
+    const projectContextPattern = /\b(project|workspace|codebase|repository|repo|file|files|package\.json|vercel|deploy|deployment|build|error|bug|server|calculator)\b/i;
+
+    let projectContext = "";
+    if (projectContextPattern.test(message)) {
+      const { data: project } = await supabase
+        .from("projects")
+        .select("id, name, description")
+        .eq("id", chat.project_id)
+        .single();
+
+      const { data: files } = await supabase
+        .from("project_files")
+        .select("path, content")
+        .eq("project_id", chat.project_id)
+        .order("path");
+
+      const { data: memories } = await supabase
+        .from("memories")
+        .select("type, content")
+        .eq("project_id", chat.project_id)
+        .order("created_at", { ascending: false })
+        .limit(30);
+
+      const fileContext = (files ?? [])
+        .map((file: { path: string; content: string }) =>
+          `FILE: ${file.path}\n${file.content}`
+        )
+        .join("\n\n")
+        .slice(0, 180000);
+
+      const memoryContext = (memories ?? [])
+        .map((memory: { type: string; content: string }) =>
+          `[${memory.type}] ${memory.content}`
+        )
+        .join("\n")
+        .slice(0, 20000);
+
+      projectContext = `
+CURRENT PROJECT:
+Name: ${project?.name ?? "Unknown"}
+Description: ${project?.description ?? "None"}
+
+PROJECT FILES:
+${fileContext || "No project files found."}
+
+PROJECT MEMORY:
+${memoryContext || "No project memory found."}
+`;
+    }
+
     const history: HistoryMessage[] = Array.isArray(body.history)
       ? body.history
           .filter(
@@ -92,9 +142,13 @@ Be concise but conversational. Match the user's tone.
 Never pretend that you performed an action you did not perform.
 Never claim code was executed, tested, deployed, or verified unless a real operation actually confirmed it.
 Do not invent project changes or tool results.
+When project context is provided, treat it as the source of truth. Do not guess about files, frameworks, dependencies, deployment configuration, or project architecture when the supplied project files can answer the question.
+You may explain or discuss project changes, but this conversational endpoint must never modify project files.
 
 Recent conversation:
-${conversation || "No previous conversation."}`,
+${conversation || "No previous conversation."}
+
+${projectContext}`,
       user: message,
     });
 
