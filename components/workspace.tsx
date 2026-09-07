@@ -32,7 +32,65 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
  async function saveFile(){if(!project||!selected)return;setBusy(true);const r=await fetch(`/api/projects/${project.id}/files`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({path:selected,content:draft,version:selectedFile?.version??1})});const d=await r.json();setBusy(false);if(!r.ok)return setNotice(d.error||'Could not save file.');setFiles(fs=>fs.map(f=>f.path===selected?d.file:f));setNotice('Saved')}
  async function newChat(){if(!project)return;const r=await fetch(`/api/projects/${project.id}/chats`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:'New chat'})});const d=await r.json();if(!r.ok)return setNotice(d.error||'Could not create chat.');setChats(c=>[d.chat,...c]);await loadChat(d.chat.id)}
  async function ensureChat(){if(chatId)return chatId;if(!project)return null;const r=await fetch(`/api/projects/${project.id}/chats`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:'New chat'})});const d=await r.json();if(!r.ok){setNotice(d.error||'Could not create chat.');return null;}setChats(c=>[d.chat,...c]);setChatId(d.chat.id);setMessages([]);return d.chat.id}
- async function send(){if(!project||!prompt.trim()||busy)return;const content=prompt.trim();setPrompt('');setBusy(true);setNotice('Preparing chat…');let activeChatId=chatId;try{activeChatId=await ensureChat();if(!activeChatId)throw new Error('Could not create a chat.');setNotice('Autonomous agent working…');const temp=crypto.randomUUID();setMessages(m=>[...m,{id:crypto.randomUUID(),role:'user',content,created_at:new Date().toISOString()},{id:temp,role:'assistant',content:'',created_at:new Date().toISOString()}]);const r=await fetch(`/api/projects/${project.id}/agent`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({request:content,chatId:activeChatId})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Agent run failed.');setRunId(d.runId);setMessages(m=>m.map(x=>x.id===temp?{...x,content:d.summary}:x));setNotice(`Completed ${d.iterations?.length||1} agent step(s).`);await loadChat(activeChatId)}catch(e){setNotice(e instanceof Error?e.message:'Agent run failed.')}finally{setBusy(false)}}
+ async function send(){
+  if(!project||!prompt.trim()||busy)return;
+  const content=prompt.trim();
+  setPrompt('');
+  setBusy(true);
+  setNotice('Understanding your request…');
+  let activeChatId=chatId;
+  try{
+   activeChatId=await ensureChat();
+   if(!activeChatId)throw new Error('Could not create a chat.');
+
+   const asksForExplanation=/^(how|what|why|when|where|who|which|can you explain|could you explain|tell me|should i|do you think|help me understand)/i.test(content);
+
+   const hasProjectTarget=/(this project|the project|my project|current project|workspace|codebase|repository|repo|project files|github|vercel)/i.test(content);
+   const hasProjectAction=/(add|create|change|update|modify|edit|fix|remove|delete|rename|move|refactor|implement|generate|push|commit|deploy|publish|connect|link|set up|setup)/i.test(content);
+   const agentRequest=!asksForExplanation&&hasProjectTarget&&hasProjectAction;
+
+   const temp=crypto.randomUUID();
+   setMessages(m=>[...m,{id:crypto.randomUUID(),role:'user',content,created_at:new Date().toISOString()},{id:temp,role:'assistant',content:'',created_at:new Date().toISOString()}]);
+
+   if(!agentRequest){
+    setNotice('Having a conversation…');
+    const r=await fetch('/api/chat',{
+     method:'POST',
+     headers:{'content-type':'application/json'},
+     body:JSON.stringify({
+      message:content,
+      chatId:activeChatId,
+      history:messages.slice(-30).map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}))
+     })
+    });
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Nexa could not respond.');
+    setMessages(m=>m.map(x=>x.id===temp?{...x,content:d.message}:x));
+    setNotice('Complete');
+    return;
+   }
+
+   setNotice('Planning project changes…');
+   const r=await fetch(`/api/projects/${project.id}/agent`,{
+    method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({request:content,chatId:activeChatId})
+   });
+   const d=await r.json();
+   if(!r.ok)throw new Error(d.error||'Agent run failed.');
+   setRunId(d.runId);
+   setMessages(m=>m.map(x=>x.id===temp?{...x,content:d.summary}:x));
+   setNotice('Saving changes…');
+   await loadChat(activeChatId);
+   setNotice('Complete');
+  }catch(e){
+   const error=e instanceof Error?e.message:'Request failed.';
+   setNotice(error);
+   setMessages(m=>m.map(x=>x.role==='assistant'&&x.content===''?{...x,content:error}:x));
+  }finally{
+   setBusy(false);
+  }
+ }
  async function downloadProject(){
   if(!project)return;
   setNotice('Preparing project ZIP…');
