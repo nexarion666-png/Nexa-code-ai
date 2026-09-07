@@ -47,7 +47,11 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
 
    const hasProjectTarget=/(this project|the project|my project|current project|workspace|codebase|repository|repo|project files|github|vercel)/i.test(content);
    const hasProjectAction=/(add|create|change|update|modify|edit|fix|remove|delete|rename|move|refactor|implement|generate|push|commit|deploy|publish|connect|link|set up|setup)/i.test(content);
-   const agentRequest=!asksForExplanation&&hasProjectTarget&&hasProjectAction;
+   const lastAssistantMessage=[...messages].reverse().find(m=>m.role==='assistant')?.content||'';
+   const isFollowUpAuthorization=/^(yes,?\s*)?(fix it|do the fix|do it|go ahead|apply that|make those changes|implement that|make the changes|do this|do that)$/i.test(content);
+   const hasRecentFixContext=/(to fix|fix this|fix would|solution is|recommended fix|i recommend|we need to|change .+ to|update .+ to|replace .+ with|remove .+|add .+|set .+ to)/i.test(lastAssistantMessage);
+
+    const agentRequest=(!asksForExplanation&&hasProjectTarget&&hasProjectAction)||(isFollowUpAuthorization&&hasRecentFixContext);
 
    const temp=crypto.randomUUID();
    setMessages(m=>[...m,{id:crypto.randomUUID(),role:'user',content,created_at:new Date().toISOString()},{id:temp,role:'assistant',content:'',created_at:new Date().toISOString()}]);
