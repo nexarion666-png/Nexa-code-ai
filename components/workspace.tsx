@@ -44,14 +44,10 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
    if(!activeChatId)throw new Error('Could not create a chat.');
 
    const asksForExplanation=/^(how|what|why|when|where|who|which|can you explain|could you explain|tell me|should i|do you think|help me understand)/i.test(content);
-
    const hasProjectTarget=/(this project|the project|my project|current project|workspace|codebase|repository|repo|project files|github|vercel)/i.test(content);
-   const hasProjectAction=/(add|create|change|update|modify|edit|fix|remove|delete|rename|move|refactor|implement|generate|push|commit|deploy|publish|connect|link|set up|setup)/i.test(content);
-   const lastAssistantMessage=[...messages].reverse().find(m=>m.role==='assistant')?.content||'';
-   const isFollowUpAuthorization=/^(yes,?\s*)?(fix it|do the fix|do it|go ahead|apply that|make those changes|implement that|make the changes|do this|do that)$/i.test(content);
-   const hasRecentFixContext=/(to fix|fix this|fix would|solution is|recommended fix|i recommend|we need to|change .+ to|update .+ to|replace .+ with|remove .+|add .+|set .+ to)/i.test(lastAssistantMessage);
-
-    const agentRequest=(!asksForExplanation&&hasProjectTarget&&hasProjectAction)||(isFollowUpAuthorization&&hasRecentFixContext);
+   const implementationPhrase=/(implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate) (this|it|that|the|these|those)/i.test(content);
+   const directImplementation=/^(implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate)( |$)/i.test(content);
+   const agentRequest=(asksForExplanation===false)&&(implementationPhrase||(hasProjectTarget&&directImplementation));
 
    const temp=crypto.randomUUID();
    setMessages(m=>[...m,{id:crypto.randomUUID(),role:'user',content,created_at:new Date().toISOString()},{id:temp,role:'assistant',content:'',created_at:new Date().toISOString()}]);
@@ -84,7 +80,7 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
    if(!r.ok)throw new Error(d.error||'Agent run failed.');
    setRunId(d.runId);
    setMessages(m=>m.map(x=>x.id===temp?{...x,content:d.summary}:x));
-   setNotice('Saving changes…');
+   setNotice('Proposal ready for review…');
    await loadChat(activeChatId);
    setNotice('Complete');
   }catch(e){
