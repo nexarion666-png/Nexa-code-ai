@@ -45,8 +45,8 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
 
    const asksForExplanation=/^(how|what|why|when|where|who|which|can you explain|could you explain|tell me|should i|do you think|help me understand)/i.test(content);
    const hasProjectTarget=/(this project|the project|my project|current project|workspace|codebase|repository|repo|project files|github|vercel)/i.test(content);
-   const implementationPhrase=/(implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate) (this|it|that|the|these|those)/i.test(content);
-   const directImplementation=/^(implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate)( |$)/i.test(content);
+   const implementationPhrase=/(build|develop|make|implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate) (this|it|that|the|these|those|me|a|an)/i.test(content);
+   const directImplementation=/^(build|develop|make|implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate)( |$)/i.test(content);
    const agentRequest=(asksForExplanation===false)&&(implementationPhrase||(hasProjectTarget&&directImplementation));
 
    const temp=crypto.randomUUID();
