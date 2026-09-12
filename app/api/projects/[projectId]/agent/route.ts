@@ -218,6 +218,7 @@ export async function POST(
       message: assistant,
     });
   } catch (e) {
+    console.error('AGENT_PROPOSAL_ERROR', e);
     if (supabase && runId) {
       await supabase
         .from('agent_runs')
