@@ -17,7 +17,7 @@ type Run = {
   summary: string | null;
 };
 
-export function AgentReview({ runId }: { runId?: string }) {
+export function AgentReview({ runId, onApproved }: { runId?: string; onApproved?: () => void }) {
   const [actions, setActions] = useState<Action[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [busy, setBusy] = useState(false);
@@ -105,6 +105,7 @@ export function AgentReview({ runId }: { runId?: string }) {
       );
 
       setNotice('Approved and implemented successfully.');
+      onApproved?.();
     } catch (error) {
       setNotice(
         error instanceof Error
