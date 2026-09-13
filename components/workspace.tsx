@@ -43,32 +43,6 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
    activeChatId=await ensureChat();
    if(!activeChatId)throw new Error('Could not create a chat.');
 
-   const asksForExplanation=/^(how|what|why|when|where|who|which|can you explain|could you explain|tell me|should i|do you think|help me understand)/i.test(content);
-   const hasProjectTarget=/(this project|the project|my project|current project|workspace|codebase|repository|repo|project files|github|vercel)/i.test(content);
-   const implementationPhrase=/(build|develop|make|implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate) (this|it|that|the|these|those|me|a|an)/i.test(content);
-   const directImplementation=/^(build|develop|make|implement|apply|fix|edit|modify|update|change|create|add|remove|delete|rename|move|refactor|generate)( |$)/i.test(content);
-   const agentRequest=(asksForExplanation===false)&&(implementationPhrase||(hasProjectTarget&&directImplementation));
-
-   const temp=crypto.randomUUID();
-   setMessages(m=>[...m,{id:crypto.randomUUID(),role:'user',content,created_at:new Date().toISOString()},{id:temp,role:'assistant',content:'',created_at:new Date().toISOString()}]);
-
-   if(!agentRequest){
-    setNotice('Having a conversation…');
-    const r=await fetch('/api/chat',{
-     method:'POST',
-     headers:{'content-type':'application/json'},
-     body:JSON.stringify({
-      message:content,
-      chatId:activeChatId,
-      history:messages.slice(-30).map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}))
-     })
-    });
-    const d=await r.json();
-    if(!r.ok)throw new Error(d.error||'Nexa could not respond.');
-    setMessages(m=>m.map(x=>x.id===temp?{...x,content:d.message}:x));
-    setNotice('Complete');
-    return;
-   }
 
    setNotice('Planning project changes…');
    const r=await fetch(`/api/projects/${project.id}/agent`,{
@@ -79,7 +53,6 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
    const d=await r.json();
    if(!r.ok)throw new Error(d.error||'Agent run failed.');
    setRunId(d.runId);
-   setMessages(m=>m.map(x=>x.id===temp?{...x,content:d.summary}:x));
    setNotice('Proposal ready for review…');
    await loadChat(activeChatId);
    setNotice('Complete');
