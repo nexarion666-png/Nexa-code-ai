@@ -19,6 +19,6 @@ export async function planProjectChange(input: { request: string; files: Project
   const prompt = `You are Nexa Code AI, an autonomous software engineer. This is iteration ${input.iteration ?? 1} of a bounded multi-step task. Return ONLY valid JSON matching {"summary":"short summary","actions":[{"type":"create_file|update_file","path":"...","content":"..."},{"type":"delete_file","path":"..."},{"type":"save_memory","memoryType":"decision|context|preference","content":"..."}],"notes":["..."]}. Make concrete changes, preserve unrelated code, never create secrets, and never claim code was executed or tested. If the request is already satisfied, return an empty actions array.\n\nUSER REQUEST:\n${input.request}\n\nCONVERSATION HISTORY:\n${conversation || 'None'}\n\nMEMORY:\n${memory || 'None'}\n\nCURRENT FILES:\n${fileContext || 'No files.'}`;
   const result = await gateway.complete({ system: 'You are the planning engine for Nexa Code AI. Be honest, precise, and practical.', user: prompt });
   const parsed = Plan.safeParse(JSON.parse(extractJson(result.text)));
-  if (parsed.success) return parsed.data as AgentPlan;
+  if (parsed.success) { console.log("AGENT_PLAN_RESULT", { provider: result.provider, summary: parsed.data.summary, actionCount: parsed.data.actions.length, actions: parsed.data.actions.map((a:any) => ({ type: a.type, path: a.path })) }); return parsed.data as AgentPlan; }
   return { summary: 'The AI produced an invalid plan format.', actions: [], notes: [`Provider response could not be validated as JSON: ${result.provider}`] };
 }
