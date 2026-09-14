@@ -1,4 +1,5 @@
-export type ChatRequest = { system?: string; user: string; model?: string };
+export type ChatImage={mimeType:string;data:string};
+export type ChatRequest={system?:string;user:string;model?:string;image?:ChatImage};
 export type ProviderResult = { text: string; provider: string; model: string };
 export type StreamChunk = { text: string; provider: string; model: string; done?: boolean };
 export interface AIProvider {

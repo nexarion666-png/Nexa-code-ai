@@ -29,7 +29,7 @@ export class AIGateway {
   }
   async stream(request: ChatRequest): Promise<ReadableStream<Uint8Array>> {
     const failures: string[] = [];
-    for (const route of this.routes) for (const key of route.keys) {
+    for (const route of (request.image ? this.routes.filter(r => r.provider.name === "google-ai-studio") : this.routes)) for (const key of route.keys) {
       if (!this.available(route, key) || !route.provider.stream) continue;
       try { return await route.provider.stream(this.requestFor(request, route.provider), key); }
       catch (error) { this.penalize(route, key, error); failures.push(`${route.provider.name}: ${error instanceof Error ? error.message : 'unknown error'}`); }
@@ -38,7 +38,7 @@ export class AIGateway {
   }
   async complete(request: ChatRequest): Promise<ProviderResult> {
     const failures: string[] = [];
-    for (const route of this.routes) for (const key of route.keys) {
+    for (const route of (request.image ? this.routes.filter(r => r.provider.name === "google-ai-studio") : this.routes)) for (const key of route.keys) {
       if (!this.available(route, key)) continue;
       try { return await route.provider.complete(this.requestFor(request, route.provider), key); }
       catch (error) { this.penalize(route, key, error); failures.push(`${route.provider.name}: ${error instanceof Error ? error.message : 'unknown error'}`); }

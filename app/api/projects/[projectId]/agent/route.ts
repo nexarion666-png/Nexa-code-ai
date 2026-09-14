@@ -20,6 +20,7 @@ export async function POST(
     const body = await readJson(req);
     const chatId = typeof body.chatId === 'string' ? body.chatId : '';
     const request = typeof body.request === 'string' ? body.request.trim() : '';
+    const image = typeof body.image === "object" && body.image !== null && typeof (body.image as any).mimeType === "string" && typeof (body.image as any).data === "string" ? { mimeType: (body.image as any).mimeType, data: (body.image as any).data } : undefined;
 
     if (!chatId) {
       return NextResponse.json({ error: 'Chat is required.' }, { status: 400 });
@@ -95,6 +96,7 @@ export async function POST(
 
     const plan = await planProjectChange({
       request,
+      image,
       files,
       projectMemory,
       conversation,
