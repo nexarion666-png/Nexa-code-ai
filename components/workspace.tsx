@@ -8,6 +8,16 @@ import { InstallAppButton } from '@/components/install-app-button';
 
 type Project={id:string;name:string;description:string|null;github_repo?:string|null;vercel_url?:string|null};
 type File={path:string;content:string;version:number};type Chat={id:string;title:string;updated_at:string};type Message={id:string;role:'user'|'assistant'|'system';content:string;created_at:string};
+async function prepareImage(file: globalThis.File){
+ const bitmap=await createImageBitmap(file);
+ const scale=Math.min(1,1600/Math.max(bitmap.width,bitmap.height));
+ const canvas=document.createElement("canvas");
+ canvas.width=Math.round(bitmap.width*scale);canvas.height=Math.round(bitmap.height*scale);
+ canvas.getContext("2d")!.drawImage(bitmap,0,0,canvas.width,canvas.height);
+ const blob=await new Promise<Blob>((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error("Image compression failed")),"image/jpeg",0.8));
+ return {mimeType:"image/jpeg",data:await new Promise<string>(resolve=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.readAsDataURL(blob)})};
+}
+
 export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
  const supabase=useMemo(()=>createSupabaseBrowserClient(),[]);const [projects,setProjects]=useState(initialProjects),[project,setProject]=useState<Project|null>(initialProjects[0]??null),[files,setFiles]=useState<File[]>([]),[selected,setSelected]=useState(''),[draft,setDraft]=useState(''),[chats,setChats]=useState<Chat[]>([]),[chatId,setChatId]=useState(''),[messages,setMessages]=useState<Message[]>([]),[prompt,setPrompt]=useState(''),[image,setImage]=useState<globalThis.File|null>(null),[busy,setBusy]=useState(false),[notice,setNotice]=useState('Ready'),[newName,setNewName]=useState(''),[runId,setRunId]=useState<string>(),[mobileView,setMobileView]=useState<'chat'|'code'|'files'|'tools'>('chat'),[mobileMenuOpen,setMobileMenuOpen]=useState(false);
  const selectedFile=files.find(f=>f.path===selected);
@@ -41,6 +51,7 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
   let activeChatId=chatId;
   try{
    activeChatId=await ensureChat();
+   const preparedImage=image?await prepareImage(image):undefined;
    if(!activeChatId)throw new Error('Could not create a chat.');
 
 
@@ -48,7 +59,7 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
    const r=await fetch(`/api/projects/${project.id}/agent`,{
     method:'POST',
     headers:{'content-type':'application/json'},
-    body:JSON.stringify({request:content,chatId:activeChatId,image:image?{mimeType:image.type,data:await new Promise<string>(resolve=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.readAsDataURL(image)})}:undefined})
+    body:JSON.stringify({request:content,chatId:activeChatId,image:preparedImage})
    });
    const d=await r.json();
    if(!r.ok)throw new Error(d.error||'Agent run failed.');
