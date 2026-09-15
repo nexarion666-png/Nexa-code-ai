@@ -48,7 +48,7 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
    const r=await fetch(`/api/projects/${project.id}/agent`,{
     method:'POST',
     headers:{'content-type':'application/json'},
-    body:JSON.stringify({request:content,chatId:activeChatId})
+    body:JSON.stringify({request:content,chatId:activeChatId,image:image?{mimeType:image.type,data:await new Promise<string>(resolve=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.readAsDataURL(image)})}:undefined})
    });
    const d=await r.json();
    if(!r.ok)throw new Error(d.error||'Agent run failed.');
