@@ -18,7 +18,7 @@ export class GeminiProvider implements AIProvider {
         }]
       })
     });
-    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    if(!response.ok){const error=await response.text();throw new Error(`HTTP ${response.status}: ${error}`);}
     const data=await response.json();
     return{text:data.candidates?.[0]?.content?.parts?.[0]?.text??'',provider:this.name,model};
   }
