@@ -4,7 +4,7 @@ export class GeminiProvider implements AIProvider {
   name='google-ai-studio';
 
   async complete(request:ChatRequest,key:string):Promise<ProviderResult>{
-    const model=request.model||process.env.GEMINI_MODEL||process.env.DEFAULT_MODEL||'gemini-2.5-flash';
+    const model=request.model||process.env.GEMINI_MODEL||process.env.DEFAULT_MODEL||'gemini-3.1-flash-lite';
     const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,{
       method:'POST',
       headers:{'content-type':'application/json'},
@@ -24,7 +24,7 @@ export class GeminiProvider implements AIProvider {
   }
 
   async stream(request:ChatRequest,key:string){
-    const model=request.model||process.env.GEMINI_MODEL||process.env.DEFAULT_MODEL||'gemini-2.5-flash';
+    const model=request.model||process.env.GEMINI_MODEL||process.env.DEFAULT_MODEL||'gemini-3.1-flash-lite';
     const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`,{
       method:'POST',
       headers:{'content-type':'application/json'},

@@ -9,7 +9,7 @@ import { createSupabaseServerClient } from '@/lib/supabase/server';
 type Route = { provider: AIProvider; keys: string[] };
 const splitKeys = (value?: string) => (value ?? '').split(',').map(x => x.trim()).filter(Boolean);
 const modelFor = (name: string) => ({
-  'google-ai-studio': process.env.GEMINI_MODEL || process.env.DEFAULT_MODEL || 'gemini-2.5-flash',
+  'google-ai-studio': process.env.GEMINI_MODEL || process.env.DEFAULT_MODEL || 'gemini-3.1-flash-lite',
   groq: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
   openrouter: process.env.OPENROUTER_MODEL || 'openrouter/auto',
   huggingface: process.env.HUGGINGFACE_MODEL || 'Qwen/Qwen2.5-Coder-32B-Instruct',
