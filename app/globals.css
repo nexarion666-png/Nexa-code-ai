@@ -228,3 +228,5 @@
     border-color:#242b35;
   }
 }
+
+@media(max-width:720px){.mode-switch{justify-content:flex-start}.mode-switch button{width:auto!important;flex:0 0 auto!important;min-width:0!important;padding:5px 10px!important;font-size:12px!important;height:32px!important}}
