@@ -1,0 +1,6 @@
+import { AIProvider, ChatRequest, ProviderResult } from '../types';
+export class HuggingFaceProvider implements AIProvider {
+  name='huggingface';
+  async complete(request:ChatRequest,key:string):Promise<ProviderResult>{const model=request.model||process.env.HUGGINGFACE_MODEL||'Qwen/Qwen2.5-Coder-32B-Instruct';const response=await fetch('https://router.huggingface.co/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:`Bearer ${key}`},body:JSON.stringify({model,messages:[{role:'system',content:request.system??''},{role:'user',content:request.user}]})});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();return{text:data.choices?.[0]?.message?.content??'',provider:this.name,model};}
+  async stream(request:ChatRequest,key:string){const model=request.model||process.env.HUGGINGFACE_MODEL||'Qwen/Qwen2.5-Coder-32B-Instruct';const response=await fetch('https://router.huggingface.co/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:`Bearer ${key}`},body:JSON.stringify({model,stream:true,messages:[{role:'system',content:request.system??''},{role:'user',content:request.user}]})});if(!response.ok||!response.body)throw new Error(`HTTP ${response.status}`);return response.body;}
+}
