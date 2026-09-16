@@ -1,0 +1,3 @@
+import { NextResponse } from 'next/server';
+import { requireUser } from '@/lib/supabase/auth';
+export async function GET(_:Request,{params}:{params:Promise<{runId:string}>}){try{const {runId}=await params;const {supabase,user}=await requireUser();const {data,error}=await supabase.from('agent_runs').select('*,projects!inner(owner_id)').eq('id',runId).eq('projects.owner_id',user.id).single();if(error||!data)return NextResponse.json({error:'Agent run not found.'},{status:404});const {data:actions}=await supabase.from('agent_actions').select('*').eq('run_id',runId).order('iteration').order('created_at');return NextResponse.json({run:data,actions:actions??[]});}catch(e){return NextResponse.json({error:e instanceof Error?e.message:'Could not load agent run.'},{status:400});}}

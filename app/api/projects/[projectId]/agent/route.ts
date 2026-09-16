@@ -1,0 +1,275 @@
+import { NextResponse } from 'next/server';
+import { guardRequest, readJson, validateRelativePath } from '@/lib/security';
+import { planProjectChange } from '@/lib/agent/planner';
+import { validateProjectActions } from '@/lib/agent/validation';
+
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ projectId: string }> }
+) {
+  let supabase: any = null;
+  let runId: string | null = null;
+
+  try {
+    const { projectId } = await params;
+
+    const guard = await guardRequest(req, 'agent-run', 8);
+    if (guard instanceof NextResponse) return guard;
+
+    ({ supabase } = guard);
+
+    const body = await readJson(req);
+    const chatId = typeof body.chatId === 'string' ? body.chatId : '';
+    const request = typeof body.request === 'string' ? body.request.trim() : '';
+    const image = typeof body.image === "object" && body.image !== null && typeof (body.image as any).mimeType === "string" && typeof (body.image as any).data === "string" ? { mimeType: (body.image as any).mimeType, data: (body.image as any).data } : undefined;
+
+    if (!chatId) {
+      return NextResponse.json({ error: 'Chat is required.' }, { status: 400 });
+    }
+
+    if (!request) {
+      return NextResponse.json({ error: 'Request is required.' }, { status: 400 });
+    }
+
+    if (request.length > 12000) {
+      return NextResponse.json({ error: 'Request is too long.' }, { status: 413 });
+    }
+
+    const { data: project } = await supabase
+      .from('projects')
+      .select('id,name')
+      .eq('id', projectId)
+      .single();
+
+    if (!project) {
+      return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
+    }
+
+    const { data: chat } = await supabase
+      .from('chats')
+      .select('id')
+      .eq('id', chatId)
+      .eq('project_id', projectId)
+      .single();
+
+    if (!chat) {
+      return NextResponse.json({ error: 'Chat not found.' }, { status: 404 });
+    }
+
+    const { data: existing, error: fileError } = await supabase
+      .from('project_files')
+      .select('path,content')
+      .eq('project_id', projectId)
+      .order('path');
+
+    if (fileError) throw fileError;
+
+    const { data: memories, error: memoryError } = await supabase
+      .from('memories')
+      .select('type,content')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
+      .limit(60);
+
+    if (memoryError) throw memoryError;
+
+    const { data: history, error: historyError } = await supabase
+      .from('messages')
+      .select('role,content')
+      .eq('chat_id', chatId)
+      .order('created_at', { ascending: false })
+      .limit(30);
+
+    if (historyError) throw historyError;
+
+    const conversation = (history ?? [])
+      .reverse()
+      .map((m: any) => `${m.role.toUpperCase()}: ${m.content}`);
+
+    const files = (existing ?? []).map((f: any) => ({
+      path: f.path,
+      content: f.content,
+    }));
+
+    const projectMemory = (memories ?? []).map(
+      (m: any) => `[${m.type}] ${m.content}`
+    );
+
+    const plan = await planProjectChange({
+      request,
+      image,
+      files,
+      projectMemory,
+      conversation,
+      iteration: 1,
+    });
+
+    const unsafeAction = plan.actions.find((action: any) => {
+      if (action.type === 'save_memory') {
+        return typeof action.content !== 'string' || action.content.length > 5000;
+      }
+
+      try {
+        validateRelativePath(action.path);
+
+        if (action.type === 'delete_file') {
+          return false;
+        }
+
+        return typeof action.content !== 'string' || action.content.length > 1_000_000;
+      } catch {
+        return true;
+      }
+    });
+    if (unsafeAction) {
+      return NextResponse.json(
+        {
+          error: 'The generated proposal contains an unsafe or oversized action and was not presented for approval.',
+          validation: {
+            ok: false,
+            errors: [
+              {
+                severity: 'error',
+                code: 'unsafe-action',
+                message: 'Every generated path and content payload must pass the server safety limits.',
+                path: 'path' in unsafeAction ? unsafeAction.path : undefined,
+              },
+            ],
+            warnings: [],
+          },
+        },
+        { status: 422 },
+      );
+    }
+
+    const validation = validateProjectActions(files, plan.actions);
+    if (!validation.ok) {
+      return NextResponse.json(
+        {
+          error: 'The generated proposal failed project consistency checks and was not presented for approval.',
+          summary: plan.summary,
+          validation,
+        },
+        { status: 422 },
+      );
+    }
+    const safeActions = plan.actions;
+
+    const { error: userMessageError } = await supabase
+      .from('messages')
+      .insert({
+        chat_id: chatId,
+        role: 'user',
+        content: request,
+      });
+
+    if (userMessageError) throw userMessageError;
+
+    const { data: run, error: runError } = await supabase
+      .from('agent_runs')
+      .insert({
+        project_id: projectId,
+        chat_id: chatId,
+        request,
+        status: 'pending',
+        summary: plan.summary,
+        max_iterations: 3,
+        repair_attempts: 0,
+        verification: { phase: 'not_run', static: validation },
+      })
+      .select()
+      .single();
+
+    if (runError) throw runError;
+
+    runId = run.id;
+
+    for (const action of safeActions) {
+      const previous =
+        action.type === 'save_memory'
+          ? null
+          : files.find((f: any) => f.path === action.path)?.content ?? null;
+
+      const { error: actionError } = await supabase
+        .from('agent_actions')
+        .insert({
+          run_id: run.id,
+          iteration: 1,
+          action_type: action.type,
+          path: "path" in action ? action.path : null,
+          before_content: previous,
+          memory_type:
+            action.type === 'save_memory' ? action.memoryType : null,
+          after_content:
+            action.type === 'delete_file' || action.type === 'save_memory'
+              ? action.type === 'save_memory'
+                ? action.content
+                : null
+              : action.content,
+        });
+
+      if (actionError) throw actionError;
+    }
+
+    const summary =
+      plan.summary ||
+      'I prepared a proposed implementation. Review it before applying any changes.';
+
+    const assistantContent =
+      `I prepared a proposed implementation, but I have not changed your files.\n\n` +
+      `${summary}\n\n` +
+      `Review the proposed changes and approve them when you're ready.`;
+
+    const { data: assistant, error: assistantError } = await supabase
+      .from('messages')
+      .insert({
+        chat_id: chatId,
+        role: 'assistant',
+        content: assistantContent,
+      })
+      .select()
+      .single();
+
+    if (assistantError) throw assistantError;
+
+    await supabase
+      .from('chats')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', chatId);
+
+    return NextResponse.json({
+      runId: run.id,
+      status: 'pending',
+      summary,
+      iterations: [
+        {
+          iteration: 1,
+          summary: plan.summary,
+          notes: plan.notes,
+          actions: safeActions,
+        },
+      ],
+      actions: safeActions,
+      message: assistant,
+    });
+  } catch (e) {
+    console.error('AGENT_PROPOSAL_ERROR', e);
+    if (supabase && runId) {
+      await supabase
+        .from('agent_runs')
+        .update({
+          status: 'failed',
+          summary: e instanceof Error ? e.message : 'Agent proposal failed.',
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', runId);
+    }
+
+    const message =
+      e instanceof Error ? e.message : 'Agent proposal failed.';
+
+    const status = /Authentication|required/i.test(message) ? 401 : 400;
+
+    return NextResponse.json({ error: message }, { status });
+  }
+}
