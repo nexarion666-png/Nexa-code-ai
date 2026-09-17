@@ -471,6 +471,50 @@ function validateWebsiteCompleteness(
       ),
     );
   }
+
+  if (!/<button\b|type\s*=\s*["']submit["']|onClick\s*=/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-buttons-missing',
+        'The website needs a visible button or interactive action, not only passive text and navigation.',
+        pagePath,
+      ),
+    );
+  }
+
+  if (!/<(?:img|Image)\b|background-image\s*:|https?:\/\/[^"'` )]+(?:\.(?:png|jpe?g|gif|svg|webp)|[/?]image)/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-visual-missing',
+        'The website needs at least one visual image or deliberate visual media treatment in the hero or content.',
+        pagePath,
+      ),
+    );
+  }
+
+  if (!/(?:\b(?:bg|text|border|from|via|to)-[\w[\]/:%.-]+|#[0-9a-f]{3,8}\b|(?:color|background|font-family)\s*:)/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-design-missing',
+        'The website needs an explicit visual design system with colors, backgrounds, or typography styling.',
+        pagePath,
+      ),
+    );
+  }
+
+  if (!/(?:\b(?:sm|md|lg|xl):|@media\b)/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-responsive-missing',
+        'The website needs responsive behavior for mobile and desktop layouts.',
+        pagePath,
+      ),
+    );
+  }
 }
 
 export function validateProjectActions(
