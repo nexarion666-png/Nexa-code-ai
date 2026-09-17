@@ -386,7 +386,98 @@ function validateFramework(packageJson: JsonObject | null, files: Map<string, st
   }
 }
 
-export function validateProjectActions(existingFiles: ProjectFile[], actions: AgentAction[]): ValidationResult {
+function validateWebsiteCompleteness(
+  request: string | undefined,
+  existingFiles: ProjectFile[],
+  files: Map<string, string>,
+  errors: ValidationIssue[],
+) {
+  if (existingFiles.length > 0 || !request || !/\b(?:website|web site|landing page|online store|e-?commerce|portfolio|dashboard|dealership)\b/i.test(request)) {
+    return;
+  }
+
+  const pagePath = [...files.keys()].find((path) =>
+    /^(?:app\/page|pages\/index)\.(?:tsx?|jsx?)$/.test(path),
+  );
+  const source = [...files.entries()]
+    .filter(([path]) => /\.(?:tsx?|jsx?)$/i.test(path))
+    .map(([path, content]) => `FILE: ${path}\n${content}`)
+    .join('\n');
+
+  if (!pagePath) {
+    errors.push(
+      issue(
+        'error',
+        'website-entrypoint-missing',
+        'A new website must include an app/page.tsx or pages/index.tsx entrypoint.',
+        'app/page.tsx',
+      ),
+    );
+    return;
+  }
+
+  if (!/<(?:nav|header)\b/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-navigation-missing',
+        'The website needs a navigation or header section so visitors can move through the experience.',
+        pagePath,
+      ),
+    );
+  }
+
+  if (!/<main\b/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-main-missing',
+        'The website needs a main content region beyond the page shell.',
+        pagePath,
+      ),
+    );
+  }
+
+  const sectionCount = (source.match(/<section\b/gi) ?? []).length;
+  if (sectionCount < 3) {
+    errors.push(
+      issue(
+        'error',
+        'website-sections-incomplete',
+        `A complete website needs at least three meaningful content sections; only ${sectionCount} section${sectionCount === 1 ? '' : 's'} were generated.`,
+        pagePath,
+      ),
+    );
+  }
+
+  if (!/<footer\b/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-footer-missing',
+        'The website needs a footer with useful closing navigation or contact details.',
+        pagePath,
+      ),
+    );
+  }
+
+  if (!/(?:<button\b|<a\b[^>]+href=|<form\b|onClick\s*=)/i.test(source)) {
+    errors.push(
+      issue(
+        'error',
+        'website-interaction-missing',
+        'The website needs at least one usable call to action, link, form, or interaction.',
+        pagePath,
+      ),
+    );
+  }
+}
+
+export function validateProjectActions(
+  existingFiles: ProjectFile[],
+  actions: AgentAction[],
+  request?: string,
+): ValidationResult {
   const errors: ValidationIssue[] = [];
   const warnings: ValidationIssue[] = [];
   const files = new Map<string, string>();
@@ -429,6 +520,7 @@ export function validateProjectActions(existingFiles: ProjectFile[], actions: Ag
   validateImports(files, packageJson, errors);
   validateStyling(files, packageJson, errors, warnings);
   validateAssets(files, errors);
+  validateWebsiteCompleteness(request, existingFiles, files, errors);
 
   return {
     ok: errors.length === 0,

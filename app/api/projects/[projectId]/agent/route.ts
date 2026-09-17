@@ -141,7 +141,7 @@ export async function POST(
           ],
           warnings: [],
         }
-      : validateProjectActions(files, plan.actions);
+      : validateProjectActions(files, plan.actions, request);
 
     for (let repairIteration = 1; !validation.ok && repairIteration <= 2; repairIteration += 1) {
       const feedback = validationFeedback(validation.errors);
@@ -167,7 +167,7 @@ export async function POST(
             ],
             warnings: [],
           }
-        : validateProjectActions(files, plan.actions);
+        : validateProjectActions(files, plan.actions, request);
     }
 
     if (unsafeAction) {
