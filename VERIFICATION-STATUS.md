@@ -2,7 +2,7 @@
 
 ## Phase 5 production repair
 
-The agent now distinguishes proposal validation, application, production-build verification, and runtime verification. A proposal with statically detectable dependency, import, asset, framework, or styling inconsistencies is rejected before approval. Approved actions are applied only after the existing owner and stale-file checks pass.
+The agent now distinguishes proposal validation, application, production-build verification, and runtime verification. A proposal with statically detectable dependency, import, asset, framework, or styling inconsistencies is sent back through two bounded planner-correction attempts before it is rejected. If it still fails, the response includes the exact file and validation error instead of only a generic failure. Approved actions are applied only after the existing owner and stale-file checks pass.
 
 For supported Next.js projects, approval runs a controlled dependency installation with lifecycle scripts disabled and invokes only the explicit `next build` entrypoint in an isolated temporary workspace. A failed build is recorded and passed back to the planner for up to three real corrective iterations. The run stores the latest verification result and its complete verification history without storing environment variables or tokens.
 

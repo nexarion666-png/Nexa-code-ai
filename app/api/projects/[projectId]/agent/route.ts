@@ -1,7 +1,30 @@
 import { NextResponse } from 'next/server';
 import { guardRequest, readJson, validateRelativePath } from '@/lib/security';
 import { planProjectChange } from '@/lib/agent/planner';
+import { AgentAction } from '@/lib/agent/types';
 import { validateProjectActions } from '@/lib/agent/validation';
+
+function findUnsafeAction(actions: AgentAction[]) {
+  return actions.find((action) => {
+    if (action.type === 'save_memory') {
+      return action.content.length > 5000;
+    }
+
+    try {
+      validateRelativePath(action.path);
+      if (action.type === 'delete_file') return false;
+      return action.content.length > 1_000_000;
+    } catch {
+      return true;
+    }
+  });
+}
+
+function validationFeedback(errors: { message: string; path?: string }[]) {
+  return errors
+    .map((error) => `- ${error.path ? `${error.path}: ` : ''}${error.message}`)
+    .join('\n');
+}
 
 export async function POST(
   req: Request,
@@ -95,7 +118,7 @@ export async function POST(
       (m: any) => `[${m.type}] ${m.content}`
     );
 
-    const plan = await planProjectChange({
+    let plan = await planProjectChange({
       request,
       image,
       files,
@@ -104,49 +127,63 @@ export async function POST(
       iteration: 1,
     });
 
-    const unsafeAction = plan.actions.find((action: any) => {
-      if (action.type === 'save_memory') {
-        return typeof action.content !== 'string' || action.content.length > 5000;
-      }
-
-      try {
-        validateRelativePath(action.path);
-
-        if (action.type === 'delete_file') {
-          return false;
+    let unsafeAction = findUnsafeAction(plan.actions);
+    let validation = unsafeAction
+      ? {
+          ok: false,
+          errors: [
+            {
+              severity: 'error' as const,
+              code: 'unsafe-action',
+              message: 'Every generated path and content payload must pass the server safety limits.',
+              path: 'path' in unsafeAction ? unsafeAction.path : undefined,
+            },
+          ],
+          warnings: [],
         }
+      : validateProjectActions(files, plan.actions);
 
-        return typeof action.content !== 'string' || action.content.length > 1_000_000;
-      } catch {
-        return true;
-      }
-    });
-    if (unsafeAction) {
-      return NextResponse.json(
-        {
-          error: 'The generated proposal contains an unsafe or oversized action and was not presented for approval.',
-          validation: {
+    for (let repairIteration = 1; !validation.ok && repairIteration <= 2; repairIteration += 1) {
+      const feedback = validationFeedback(validation.errors);
+      plan = await planProjectChange({
+        request: `${request}\n\nThe previous proposal failed static project consistency checks and must be corrected before approval. Return a complete corrected plan, not a description. Fix these exact issues:\n${feedback}`,
+        image,
+        files,
+        projectMemory,
+        conversation,
+        iteration: repairIteration + 1,
+      });
+      unsafeAction = findUnsafeAction(plan.actions);
+      validation = unsafeAction
+        ? {
             ok: false,
             errors: [
               {
-                severity: 'error',
+                severity: 'error' as const,
                 code: 'unsafe-action',
                 message: 'Every generated path and content payload must pass the server safety limits.',
                 path: 'path' in unsafeAction ? unsafeAction.path : undefined,
               },
             ],
             warnings: [],
-          },
+          }
+        : validateProjectActions(files, plan.actions);
+    }
+
+    if (unsafeAction) {
+      return NextResponse.json(
+        {
+          error: `The generated proposal could not be made safe after two correction attempts. ${validationFeedback(validation.errors)}`,
+          validation,
         },
         { status: 422 },
       );
     }
 
-    const validation = validateProjectActions(files, plan.actions);
     if (!validation.ok) {
       return NextResponse.json(
         {
-          error: 'The generated proposal failed project consistency checks and was not presented for approval.',
+          error: `The generated proposal still failed project consistency checks after two correction attempts:\n${validationFeedback(validation.errors)}`,
           summary: plan.summary,
           validation,
         },

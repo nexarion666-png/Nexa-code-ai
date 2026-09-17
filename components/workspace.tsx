@@ -67,7 +67,10 @@ export function Workspace({initialProjects=[]}:{initialProjects?:Project[]}){
     body:JSON.stringify(mode==='conversation'?{message:content,chatId:activeChatId,history:messages.map(m=>({role:m.role,content:m.content}))}:{request:content,chatId:activeChatId,image:preparedImage})
    });
    const d=await r.json();
-   if(!r.ok)throw new Error(d.error||'Agent run failed.');
+    if(!r.ok){
+      const validationErrors=Array.isArray(d.validation?.errors)?d.validation.errors.map((item:{message?:string;path?:string})=>`- ${item.path?`${item.path}: `:''}${item.message||'Consistency check failed.'}`).join('\n'):'';
+      throw new Error([d.error||'Agent run failed.',validationErrors].filter(Boolean).join('\n'));
+    }
    setRunId(d.runId);
    setNotice('Proposal ready for review…');
    await loadChat(activeChatId);
