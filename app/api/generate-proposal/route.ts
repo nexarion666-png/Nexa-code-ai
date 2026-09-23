@@ -48,7 +48,7 @@ export async function POST(request: Request) {
   try { await incrementUsage(supabase, user.id, 'proposal'); } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 }); }
 
   const keysByProvider = await loadUserProviderKeys(supabase, user.id);
-  const provider = selectProvider(keysByProvider: keysByProvider as any, requestedProvider);
+  const provider = selectProvider(keysByProvider, requestedProvider);
   if (!provider) return NextResponse.json({ error: 'No AI provider keys are configured. Open AI Settings and add a key.' }, { status: 400 });
 
   const safeHistory: AIMessage[] = history
