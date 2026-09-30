@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Menu, RefreshCw, Download, ChevronDown, Folder, MessageSquare, Code2, Files, Zap, Check, Search, Plus, Home, Bookmark, CalendarDays, Trash2, Github, Cloud, Archive, X, Settings, Eye, Rocket, Share2 } from 'lucide-react';
 import { deleteProject } from '@/app/actions/projects';
-import { GitHubTools } from './github-tools';
+import { ToolsPanel } from './ToolsPanel';
 import { ProjectModal } from './project-modal';
 import { NexaMark } from './logo';
 import { ChatPanel } from './chat-panel';
@@ -80,7 +80,7 @@ export function AppShell({ project, projects, initialMessages, initialProposal, 
       {tab === 'chat' && <ChatPanel projectId={project.id} initialMessages={initialMessages} initialProposal={initialProposal} onProposalGenerated={proposalGenerated} onReviewChanges={reviewFromChat} />}
       {tab === 'code' && <WorkspacePanel projectId={project.id} refreshKey={workspaceRefresh} autoReview={autoReview} activeTab={workspaceTab} initialTab="code" onApplied={proposalApplied} />}
       {tab === 'files' && <WorkspacePanel projectId={project.id} refreshKey={workspaceRefresh} autoReview={autoReview} activeTab="files" initialTab="files" onApplied={proposalApplied} />}
-      {tab === 'tools' && <GitHubTools projectId={project.id} projectName={project.name} connected={githubConnected} repoUrl={project.github_repo_url ?? null} />}
+      {tab === 'tools' && <ToolsPanel projectId={project.id} projectName={project.name} connected={githubConnected} repoUrl={project.github_repo_url ?? null} />}
     </section>
 
     <nav className="pwa-bottom-nav fixed bottom-0 left-1/2 z-50 flex h-[65px] w-full items-center justify-around border-t border-zinc-800 bg-[#09090b]/96 px-3 backdrop-blur-xl md:hidden">
