@@ -181,23 +181,15 @@ export function createStreamingFailover({
       let lastErr = 'Unknown provider error';
 
       for (const provider of order) {
-        const cooldown = cooldownUntil[provider] ?? 0;
-        if (cooldown > Date.now()) {
-          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: `Provider cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s remaining)` });
+        if ((cooldownUntil[provider] ?? 0) > Date.now()) {
+          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: 'Provider cooldown active' });
+          lastErr = 'Provider cooldown active';
           continue;
         }
-
         const keys = keysByProvider[provider] ?? [];
         const models = modelsFor(provider);
         const providerTried = { provider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
 
-        if (!keys.length) {
-          providerTried.lastError = 'No API keys configured';
-          tried.push(providerTried);
-          continue;
-        }
-
-        let stopProvider = false;
         for (const key of keys) {
           providerTried.keysTried += 1;
           for (const model of models) {
@@ -216,13 +208,15 @@ export function createStreamingFailover({
               console.error(`[STREAM FAIL] ${provider} ${model}: ${lastErr}`);
               if (isCooldownError(error)) {
                 startCooldown(provider);
-                stopProvider = true;
+                controller.enqueue(`${SWITCH_PREFIX}${provider}`);
+                // A provider-level quota/network failure should immediately move
+                // to the next provider instead of burning through every key/model.
+                break;
               }
               controller.enqueue(`${SWITCH_PREFIX}${provider}`);
-              if (stopProvider) break;
             }
           }
-          if (stopProvider) break;
+          if ((cooldownUntil[provider] ?? 0) > Date.now()) break;
         }
         tried.push(providerTried);
       }
@@ -248,7 +242,7 @@ export async function streamWithFailover({
 }): Promise<void> {
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = keys.slice(0, 3).map((value, index) => ({ id: `${provider}-${index + 1}`, value }));
-  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat: false });
+  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages });
   const reader = stream.getReader();
   try {
     while (true) {

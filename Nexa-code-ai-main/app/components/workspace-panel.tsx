@@ -53,7 +53,6 @@ export function WorkspacePanel({ projectId, refreshKey, autoReview, initialTab, 
 
   async function applyProposal() {
     if (!proposal) return;
-    setError('');
     setApplying(true); setError('');
     try {
       const response = await fetch('/api/apply-proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proposalId: proposal.id }) });

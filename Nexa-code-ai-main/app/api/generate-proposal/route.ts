@@ -45,6 +45,7 @@ export async function POST(request: Request) {
 
   const usageCheck = await checkUsageLimit(supabase, user, 'proposal');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily proposal limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited proposals.`, usage: usageCheck.usage }, { status: 429 });
+
   const keysByProvider = await loadUserProviderKeys(supabase, user.id);
   const provider = selectProvider(keysByProvider, requestedProvider);
   if (!provider) return NextResponse.json({ error: 'No AI provider keys are configured. Open AI Settings and add a key.' }, { status: 400 });
@@ -83,15 +84,15 @@ export async function POST(request: Request) {
       keys: keysByProvider[provider],
       keysByProvider: keysByProvider as any,
       onChunk: async chunk => { generated += chunk; },
+      isChat: false,
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     if (raw.startsWith('KEYS_EXHAUSTED::')) {
-      const marker = 'KEYS_EXHAUSTED::';
-      const payloadAndError = raw.slice(marker.length);
-      const separator = payloadAndError.lastIndexOf('::');
-      const triedJson = separator >= 0 ? payloadAndError.slice(0, separator) : payloadAndError;
-      const lastErr = separator >= 0 ? payloadAndError.slice(separator + 2) : 'All providers failed';
+      const payload = raw.slice('KEYS_EXHAUSTED::'.length);
+      const separator = payload.lastIndexOf('::');
+      const triedJson = separator >= 0 ? payload.slice(0, separator) : payload;
+      const lastErr = separator >= 0 ? payload.slice(separator + 2) : 'All providers failed';
       let tried: unknown[] = [];
       try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
       console.error('[NEXA PROPOSAL KEYS_EXHAUSTED]', error);

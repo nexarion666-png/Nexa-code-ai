@@ -58,6 +58,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   useEffect(() => {
     if (retryCountdown !== 0 || !keysExhausted || streaming || generating) return;
     setKeysExhausted(null);
+    setError('');
   }, [retryCountdown, keysExhausted, streaming, generating]);
 
   async function send() {
@@ -74,11 +75,11 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
         if(event.type==='chunk'){ window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:switchingProvider==='groq'?'fallback':'primary'})); } if(event.type==='chunk') setMessages(prev=>{const copy=[...prev]; const last=copy[copy.length-1]; if(last?.role==='assistant') copy[copy.length-1]={...last,content:last.content+event.text}; return copy;});
         if(event.type==='done'){ done=true; setSwitchingProvider(''); if(event.proposalReady) setProposalReady(true); }
         if(event.type==='switching'){ setSwitchingProvider(event.provider); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:event.provider==='groq'?'fallback':'primary'})); }
-        if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All keys exhausted',retryAfter:event.retryAfter ?? 60}); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
+        if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All keys exhausted',retryAfter:event.retryAfter ?? 60}); setError(''); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
         if(event.type==='error') throw new Error(event.message);
         if(event.type==='warning') setError(event.message);
       }}
-    } catch(e) { const msg=e instanceof Error?e.message:'Something went wrong.'; setError(msg); setMessages(prev=>prev[prev.length-1]?.role==='assistant' && !prev[prev.length-1].content ? prev.slice(0,-1) : prev); }
+    } catch(e) { const msg=e instanceof Error?e.message:'Something went wrong.'; if(msg !== 'KEYS_EXHAUSTED') setError(msg); setMessages(prev=>prev[prev.length-1]?.role==='assistant' && !prev[prev.length-1].content ? prev.slice(0,-1) : prev); }
     finally { setStreaming(false); setSwitchingProvider(''); setTimeout(()=>inputRef.current?.focus(), 50); }
   }
 
@@ -87,6 +88,8 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     if (keysExhausted && retryCountdown > 0) return;
     setGenerating(true);
     setError('');
+    setKeysExhausted(null);
+    setRetryCountdown(0);
     try {
       const response = await fetch('/api/generate-proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId, history }) });
       const data = await response.json().catch(() => ({}));
@@ -110,7 +113,8 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
       onProposalGenerated?.(data.proposalId);
       window.dispatchEvent(new CustomEvent('nexa-ai-status', { detail: 'primary' }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Nexa could not generate a proposal.');
+      const message = e instanceof Error ? e.message : 'Nexa could not generate a proposal.';
+      if (message !== 'KEYS_EXHAUSTED') setError(message);
     } finally {
       setGenerating(false);
     }

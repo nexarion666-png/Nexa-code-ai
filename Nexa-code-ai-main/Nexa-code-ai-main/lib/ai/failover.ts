@@ -184,6 +184,7 @@ export function createStreamingFailover({
         const cooldown = cooldownUntil[provider] ?? 0;
         if (cooldown > Date.now()) {
           tried.push({ provider, keysTried: 0, modelsTried: [], lastError: `Provider cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s remaining)` });
+          lastErr = 'Provider cooldown active';
           continue;
         }
 
