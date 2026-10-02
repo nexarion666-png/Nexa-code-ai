@@ -166,11 +166,20 @@ export function createStreamingFailover({
   isChat = false,
 }: {
   requestedProvider?: Provider;
-  keysByProvider: Record<string, FailoverKey[]>;
+  keysByProvider: Record<string, Array<FailoverKey | string>>;
   messages: AIMessage[];
   systemPrompt?: string;
   isChat?: boolean;
 }): ReadableStream<string> {
+  const normalizedKeys: Record<Provider, FailoverKey[]> = { gemini: [], groq: [], openrouter: [] };
+  for (const provider of Object.keys(normalizedKeys) as Provider[]) {
+    const rawKeys = keysByProvider[provider] ?? [];
+    normalizedKeys[provider] = rawKeys.map((key, index) =>
+      typeof key === 'string'
+        ? { id: `${provider}-${index + 1}`, value: key }
+        : { id: String(key.id ?? `${provider}-${index + 1}`), value: String(key.value ?? '') }
+    ).filter(key => key.value.length > 0);
+  }
   const order: Provider[] = isChat
     ? ['groq', 'gemini', 'openrouter']
     : ['gemini', 'groq', 'openrouter'];
@@ -187,7 +196,7 @@ export function createStreamingFailover({
           continue;
         }
 
-        const keys = keysByProvider[provider] ?? [];
+        const keys = normalizedKeys[provider] ?? [];
         const models = modelsFor(provider);
         const providerTried = { provider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
 
@@ -204,7 +213,7 @@ export function createStreamingFailover({
             providerTried.modelsTried.push(model);
             const attempt: Attempt = { provider, key, model, messages, systemPrompt };
             try {
-              console.log(`[STREAM TRY] ${provider} ${model} key=${key.id.slice(0, 6)}`);
+              console.log(`[STREAM TRY] ${provider} ${model} key=${String(key.id ?? `${provider}-key`).slice(0, 6)}`);
               const providerStream = callProviderStream(attempt);
               for await (const chunk of providerStream) controller.enqueue(chunk);
               controller.close();
@@ -243,11 +252,11 @@ export async function streamWithFailover({
   provider: Provider;
   messages: AIMessage[];
   keys: string[];
-  keysByProvider?: Record<Provider, FailoverKey[]>;
+  keysByProvider?: Record<Provider, Array<FailoverKey | string>>;
   onChunk: (chunk: string) => void | Promise<void>;
 }): Promise<void> {
-  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
-  if (!keysByProvider) allKeys[provider] = keys.slice(0, 3).map((value, index) => ({ id: `${provider}-${index + 1}`, value }));
+  const allKeys: Record<Provider, Array<FailoverKey | string>> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
+  if (!keysByProvider) allKeys[provider] = keys.slice(0, 3);
   const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat: false });
   const reader = stream.getReader();
   try {
