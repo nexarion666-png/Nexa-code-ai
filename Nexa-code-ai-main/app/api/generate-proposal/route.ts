@@ -45,6 +45,7 @@ export async function POST(request: Request) {
 
   const usageCheck = await checkUsageLimit(supabase, user, 'proposal');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily proposal limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited proposals.`, usage: usageCheck.usage }, { status: 429 });
+  try { await incrementUsage(supabase, user.id, 'proposal'); } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 }); }
 
   const keysByProvider = await loadUserProviderKeys(supabase, user.id);
   const provider = selectProvider(keysByProvider, requestedProvider);
@@ -84,15 +85,11 @@ export async function POST(request: Request) {
       keys: keysByProvider[provider],
       keysByProvider: keysByProvider as any,
       onChunk: async chunk => { generated += chunk; },
-      isChat: false,
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     if (raw.startsWith('KEYS_EXHAUSTED::')) {
-      const payload = raw.slice('KEYS_EXHAUSTED::'.length);
-      const separator = payload.lastIndexOf('::');
-      const triedJson = separator >= 0 ? payload.slice(0, separator) : payload;
-      const lastErr = separator >= 0 ? payload.slice(separator + 2) : 'All providers failed';
+      const [, triedJson = '[]', lastErr = 'All providers failed'] = raw.split('::');
       let tried: unknown[] = [];
       try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
       console.error('[NEXA PROPOSAL KEYS_EXHAUSTED]', error);
@@ -104,12 +101,6 @@ export async function POST(request: Request) {
 
   const files = parseFiles(generated);
   if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
-
-  try {
-    await incrementUsage(supabase, user.id, 'proposal');
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 });
-  }
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
   const { data: proposal, error: proposalError } = await supabase

@@ -83,7 +83,6 @@ export async function POST(request: Request) {
       keys: keysByProvider[provider],
       keysByProvider: keysByProvider as any,
       onChunk: async chunk => { generated += chunk; },
-      isChat: false,
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
