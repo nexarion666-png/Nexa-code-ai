@@ -13,15 +13,22 @@ full file content here
 content
 List ALL files needed for feature. Production-ready Next.js 14 Tailwind code. No explanation outside file blocks.`;
 
-const FILE_PATTERN = /---FILE:\s*(.+?)---\s*([\s\S]*?)(?=---FILE:|$)/g;
+const FILE_PATTERN = /---\s*FILE:\s*(.+?)\s*---\s*([\s\S]*?)(?=---\s*FILE:|$)/g;
+
+const GENERATE_NOW = 'The requirements are settled. Do not ask questions and do not write any text outside file blocks. Output the complete set of files now, each starting with a line exactly like ---FILE: path/to/file.tsx--- followed by the full file content.';
 
 function parseFiles(content: string) {
   const files: { path: string; content: string }[] = [];
+  FILE_PATTERN.lastIndex = 0;
   const seen = new Set<string>();
   let match: RegExpExecArray | null;
   while ((match = FILE_PATTERN.exec(content)) !== null) {
     const path = match[1].trim().replace(/^['"]|['"]$/g, '').replace(/^\/+/, '');
-    const fileContent = match[2].replace(/^\n/, '').replace(/\s+$/, '\n');
+    const fileContent = match[2]
+      .replace(/^\s*```[\w-]*\r?\n/, '')
+      .replace(/\r?\n?```\s*$/, '')
+      .replace(/^\n/, '')
+      .replace(/\s+$/, '\n');
     if (!path || path.includes('..') || path.includes('\\') || seen.has(path)) continue;
     seen.add(path);
     files.push({ path, content: fileContent });
@@ -77,9 +84,15 @@ export async function POST(request: Request) {
   const context = existingFiles?.length
     ? `\n\nExisting project files are listed below. Preserve compatible existing behavior and update files where necessary:\n${existingFiles.map(file => `---EXISTING: ${file.path}---\n${file.content ?? ''}`).join('\n')}`
     : '';
+  // The chat history ends on an assistant turn (or a conversation-mode message), so tell the
+  // model explicitly to emit the file blocks now.
+  const lastMessage = safeHistory[safeHistory.length - 1];
+  const closingHistory: AIMessage[] = lastMessage.role === 'user'
+    ? [...safeHistory.slice(0, -1), { role: 'user', content: `${lastMessage.content}\n\n${GENERATE_NOW}` }]
+    : [...safeHistory, { role: 'user', content: GENERATE_NOW }];
   const messages: AIMessage[] = [
     { role: 'system', content: SYSTEM + context },
-    ...safeHistory,
+    ...closingHistory,
   ];
 
   let generated = '';
@@ -108,6 +121,7 @@ export async function POST(request: Request) {
   }
 
   const files = parseFiles(generated);
+  if (!files.length) console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
   if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
