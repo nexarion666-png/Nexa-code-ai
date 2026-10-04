@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { streamWithFailover, type AIMessage } from '@/lib/ai/failover';
+import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
@@ -45,10 +45,15 @@ export async function POST(request: Request) {
 
   const usageCheck = await checkUsageLimit(supabase, user, 'proposal');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily proposal limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited proposals.`, usage: usageCheck.usage }, { status: 429 });
-  try { await incrementUsage(supabase, user.id, 'proposal'); } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 }); }
-
   const keysByProvider = await loadUserProviderKeys(supabase, user.id);
   const provider = selectProvider(keysByProvider, requestedProvider);
+  // loadUserProviderKeys returns decrypted string[] values. Normalize them once
+  // at the route boundary so the failover engine receives its expected key shape.
+  const failoverKeysByProvider: Record<Provider, FailoverKey[]> = {
+    gemini: (keysByProvider.gemini ?? []).map((value, index) => ({ id: `gemini-key-${index + 1}`, value })),
+    groq: (keysByProvider.groq ?? []).map((value, index) => ({ id: `groq-key-${index + 1}`, value })),
+    openrouter: (keysByProvider.openrouter ?? []).map((value, index) => ({ id: `openrouter-key-${index + 1}`, value })),
+  };
   if (!provider) return NextResponse.json({ error: 'No AI provider keys are configured. Open AI Settings and add a key.' }, { status: 400 });
 
   const safeHistory: AIMessage[] = history
@@ -83,13 +88,16 @@ export async function POST(request: Request) {
       provider,
       messages,
       keys: keysByProvider[provider],
-      keysByProvider: keysByProvider as any,
+      keysByProvider: failoverKeysByProvider,
       onChunk: async chunk => { generated += chunk; },
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     if (raw.startsWith('KEYS_EXHAUSTED::')) {
-      const [, triedJson = '[]', lastErr = 'All providers failed'] = raw.split('::');
+      const payload = raw.slice('KEYS_EXHAUSTED::'.length);
+      const separator = payload.lastIndexOf('::');
+      const triedJson = separator >= 0 ? payload.slice(0, separator) : payload;
+      const lastErr = separator >= 0 ? payload.slice(separator + 2) : 'All providers failed';
       let tried: unknown[] = [];
       try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
       console.error('[NEXA PROPOSAL KEYS_EXHAUSTED]', error);
@@ -126,6 +134,12 @@ export async function POST(request: Request) {
       await supabase.from('proposals').delete().eq('id', proposal.id);
       return NextResponse.json({ error: changesError.message }, { status: 500 });
     }
+  }
+
+  try {
+    await incrementUsage(supabase, user.id, 'proposal');
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 });
   }
 
   const summary = `Proposal ready: ${changes.length} files to modify. [Review Changes]`;
