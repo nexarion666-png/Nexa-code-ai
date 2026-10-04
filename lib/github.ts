@@ -19,7 +19,11 @@ export async function githubRequest<T>(token: string, path: string, init: Reques
   let body: unknown = {};
   try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
   if (!response.ok) {
-    const message = typeof body === 'object' && body && 'message' in body ? String((body as { message: unknown }).message) : `GitHub request failed (${response.status}).`;
+    let message = typeof body === 'object' && body && 'message' in body ? String((body as { message: unknown }).message) : `GitHub request failed (${response.status}).`;
+    const details = typeof body === 'object' && body && Array.isArray((body as { errors?: unknown }).errors)
+      ? ((body as { errors: unknown[] }).errors).map(item => typeof item === 'string' ? item : String((item as { message?: unknown })?.message ?? '')).filter(Boolean).join('; ')
+      : '';
+    if (details) message += ` (${details})`;
     const error = new Error(message) as Error & { status?: number };
     error.status = response.status;
     throw error;
@@ -50,4 +54,43 @@ export function parseGithubUrl(value: string) {
 
 export function encodeContent(content: string) {
   return Buffer.from(content, 'utf8').toString('base64');
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Writes all files to a branch as ONE commit using the Git Data API (a handful of requests),
+// instead of one request and one commit per file.
+export async function commitFiles(token: string, fullName: string, branch: string, files: { path: string; content: string | null }[], message: string) {
+  const refPath = branch.split('/').map(encodeURIComponent).join('/');
+  let headSha = '';
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const head = await githubRequest<{ object: { sha: string } }>(token, `/repos/${fullName}/git/ref/heads/${refPath}`);
+      headSha = head.object.sha;
+      break;
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if ((status !== 404 && status !== 409) || attempt === 5) throw error;
+      await sleep(600); // a brand-new repo can take a moment to expose its first commit
+    }
+  }
+  const headCommit = await githubRequest<{ tree: { sha: string } }>(token, `/repos/${fullName}/git/commits/${headSha}`);
+  const entries: { path: string; mode: string; type: string; sha?: string; content?: string }[] = [];
+  for (const file of files) {
+    const path = file.path.replace(/^\/+/, '');
+    if (!path || path.includes('..')) continue;
+    const content = file.content ?? '';
+    if (content === '') {
+      const blob = await githubRequest<{ sha: string }>(token, `/repos/${fullName}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: '', encoding: 'utf-8' }) });
+      entries.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
+    } else {
+      entries.push({ path, mode: '100644', type: 'blob', content });
+    }
+  }
+  if (!entries.length) return { changed: false };
+  const tree = await githubRequest<{ sha: string }>(token, `/repos/${fullName}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: headCommit.tree.sha, tree: entries }) });
+  if (tree.sha === headCommit.tree.sha) return { changed: false };
+  const commit = await githubRequest<{ sha: string }>(token, `/repos/${fullName}/git/commits`, { method: 'POST', body: JSON.stringify({ message, tree: tree.sha, parents: [headSha] }) });
+  await githubRequest(token, `/repos/${fullName}/git/refs/heads/${refPath}`, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha }) });
+  return { changed: true };
 }

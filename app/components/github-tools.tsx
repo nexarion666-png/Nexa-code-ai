@@ -15,20 +15,20 @@ export function GitHubTools({ projectId, projectName, connected, repoUrl }: { pr
     setBusy(true); setMessage('Creating repository…');
     try {
       const res = await fetch('/api/github/create-repo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ projectId, repoName, isPrivate }) });
-      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Could not create repository.');
+      const data = await res.json().catch(() => ({ error: `The server stopped before replying (HTTP ${res.status}). Try again.` })); if (!res.ok) throw new Error(data.error || 'Could not create repository.');
       setMessage('Repository created.'); window.location.reload();
     } catch (e) { setMessage(e instanceof Error ? e.message : 'Could not create repository.'); } finally { setBusy(false); }
   }
 
   async function push() {
     setBusy(true); setMessage('Pushing latest files…');
-    try { const res = await fetch('/api/github/push', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId})}); const data=await res.json(); if(!res.ok) throw new Error(data.error||'Push failed.'); setMessage(`Pushed ${data.count} files.`); }
+    try { const res = await fetch('/api/github/push', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId})}); const data=await res.json().catch(()=>({error:`The server stopped before replying (HTTP ${res.status}). Try again.`})); if(!res.ok) throw new Error(data.error||'Push failed.'); setMessage(`Pushed ${data.count} files.`); }
     catch(e){setMessage(e instanceof Error?e.message:'Push failed.');} finally{setBusy(false);}
   }
 
   async function importRepo() {
     setBusy(true); setMessage('Importing repository…');
-    try { const res=await fetch('/api/github/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({githubUrl:importUrl})}); const data=await res.json(); if(!res.ok) throw new Error(data.error||'Import failed.'); window.location.href=`/app/${data.projectId}`; }
+    try { const res=await fetch('/api/github/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({githubUrl:importUrl})}); const data=await res.json().catch(()=>({error:`The server stopped before replying (HTTP ${res.status}). Try again.`})); if(!res.ok) throw new Error(data.error||'Import failed.'); window.location.href=`/app/${data.projectId}`; }
     catch(e){setMessage(e instanceof Error?e.message:'Import failed.');} finally{setBusy(false);}
   }
 
