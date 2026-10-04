@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { streamWithFailover, type AIMessage } from '@/lib/ai/failover';
+import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
@@ -47,6 +47,13 @@ export async function POST(request: Request) {
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily proposal limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited proposals.`, usage: usageCheck.usage }, { status: 429 });
   const keysByProvider = await loadUserProviderKeys(supabase, user.id);
   const provider = selectProvider(keysByProvider, requestedProvider);
+  // loadUserProviderKeys returns decrypted string[] values. Normalize them once
+  // at the route boundary so the failover engine receives its expected key shape.
+  const failoverKeysByProvider: Record<Provider, FailoverKey[]> = {
+    gemini: (keysByProvider.gemini ?? []).map((value, index) => ({ id: `gemini-key-${index + 1}`, value })),
+    groq: (keysByProvider.groq ?? []).map((value, index) => ({ id: `groq-key-${index + 1}`, value })),
+    openrouter: (keysByProvider.openrouter ?? []).map((value, index) => ({ id: `openrouter-key-${index + 1}`, value })),
+  };
   if (!provider) return NextResponse.json({ error: 'No AI provider keys are configured. Open AI Settings and add a key.' }, { status: 400 });
 
   const safeHistory: AIMessage[] = history
@@ -81,9 +88,8 @@ export async function POST(request: Request) {
       provider,
       messages,
       keys: keysByProvider[provider],
-      keysByProvider,
+      keysByProvider: failoverKeysByProvider,
       onChunk: async chunk => { generated += chunk; },
-      isChat: false,
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
