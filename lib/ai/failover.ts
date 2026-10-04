@@ -23,6 +23,7 @@ type Attempt = {
   model: string;
   messages: AIMessage[];
   systemPrompt?: string;
+  idleTimeoutMs: number;
 };
 
 const cooldownUntil: Record<string, number> = {};
@@ -92,10 +93,10 @@ async function* readSSE(body: ReadableStream<Uint8Array>, onActivity?: () => voi
 
 async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
   const controller = new AbortController();
-  let timeout = setTimeout(() => controller.abort(), 8_000);
+  let timeout = setTimeout(() => controller.abort(), attempt.idleTimeoutMs);
   const resetTimeout = () => {
     clearTimeout(timeout);
-    timeout = setTimeout(() => controller.abort(), 8_000);
+    timeout = setTimeout(() => controller.abort(), attempt.idleTimeoutMs);
   };
 
   try {
@@ -214,7 +215,8 @@ export function createStreamingFailover({
           providerTried.keysTried += 1;
           for (const model of models) {
             providerTried.modelsTried.push(model);
-            const attempt: Attempt = { provider, key, model, messages, systemPrompt };
+            // Chat stays snappy (8s); proposals generate whole files, so allow longer gaps between events.
+            const attempt: Attempt = { provider, key, model, messages, systemPrompt, idleTimeoutMs: isChat ? 8_000 : 45_000 };
             try {
               const safeKeyId = String(key.id || `${provider}-${providerTried.keysTried}`).slice(0, 6);
               console.log(`[STREAM TRY] ${provider} ${model} key=${safeKeyId}`);

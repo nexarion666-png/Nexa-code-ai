@@ -5,6 +5,7 @@ import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 const SYSTEM = `You are Nexa, senior full-stack dev. Based on conversation, output detailed plan, then output files EXACTLY like:
 ---FILE: app/page.tsx---
