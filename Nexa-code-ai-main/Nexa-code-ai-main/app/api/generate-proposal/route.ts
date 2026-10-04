@@ -81,8 +81,9 @@ export async function POST(request: Request) {
       provider,
       messages,
       keys: keysByProvider[provider],
-      keysByProvider: keysByProvider as any,
+      keysByProvider,
       onChunk: async chunk => { generated += chunk; },
+      isChat: false,
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
@@ -103,12 +104,6 @@ export async function POST(request: Request) {
 
   const files = parseFiles(generated);
   if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
-
-  try {
-    await incrementUsage(supabase, user.id, 'proposal');
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 });
-  }
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
   const { data: proposal, error: proposalError } = await supabase
@@ -134,6 +129,12 @@ export async function POST(request: Request) {
       await supabase.from('proposals').delete().eq('id', proposal.id);
       return NextResponse.json({ error: changesError.message }, { status: 500 });
     }
+  }
+
+  try {
+    await incrementUsage(supabase, user.id, 'proposal');
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 });
   }
 
   const summary = `Proposal ready: ${changes.length} files to modify. [Review Changes]`;
