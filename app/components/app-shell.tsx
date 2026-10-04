@@ -29,6 +29,7 @@ export function AppShell({ project, projects, initialMessages, initialProposal, 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [workspaceRefresh, setWorkspaceRefresh] = useState(0);
   const [autoReview, setAutoReview] = useState(0);
+  const [appliedCount, setAppliedCount] = useState(0);
   const [shareToast, setShareToast] = useState('');
   const [aiStatus, setAiStatus] = useState<'primary' | 'fallback' | 'exhausted'>('primary');
   useEffect(() => {
@@ -42,7 +43,7 @@ export function AppShell({ project, projects, initialMessages, initialProposal, 
 
   function openWorkspace(view: WorkspaceTab) { setWorkspaceTab(view); setTab('code'); }
   function proposalGenerated() { setWorkspaceRefresh(value => value + 1); }
-  function proposalApplied() { setWorkspaceRefresh(value => value + 1); }
+  function proposalApplied() { setWorkspaceRefresh(value => value + 1); setAppliedCount(value => value + 1); }
   function reviewFromChat() { openWorkspace('code'); setAutoReview(value => value + 1); setWorkspaceRefresh(value => value + 1); }
 
   async function shareProject() {
@@ -77,7 +78,7 @@ export function AppShell({ project, projects, initialMessages, initialProposal, 
     <section className="mx-3 mt-1 rounded-2xl border border-zinc-800 bg-[#0d101d] px-3 py-3"><div className="flex items-start justify-between gap-2"><div className="flex items-center gap-2"><NexaMark small/><div><div className="text-sm font-semibold text-indigo-100">NEXA AGENT</div><div className="mt-1 text-xs text-indigo-200/70">{tab === 'chat' ? 'Conversation mode · understanding first' : 'Workspace · review before applying'}</div></div></div></div><div className="mt-3 grid grid-cols-5 gap-0">{[['Understand','done',<Check size={15}/>], ['Plan','done',<Check size={15}/>], ['Build','active',<Code2 size={15}/>], ['Review','next',<Search size={15}/>], ['Improve','next',<RefreshCw size={15}/>]].map(([label,state,icon],i)=><div key={String(label)} className="relative text-center"><div className={`mx-auto flex h-8 w-8 items-center justify-center rounded-full border ${state==='done' ? 'border-emerald-400 bg-emerald-400 text-black shadow-[0_0_16px_rgba(52,211,153,.4)]' : state==='active' ? 'border-violet-400 bg-violet-500/15 text-violet-200 shadow-[0_0_18px_rgba(139,92,246,.65)]' : 'border-zinc-700 bg-zinc-900 text-zinc-500'}`}>{icon}</div><div className={`mt-1.5 whitespace-nowrap text-[10px] ${state==='active'?'text-white':'text-zinc-400'}`}>{label}</div>{i<4 && <div className={`absolute left-[calc(50%+15px)] right-[calc(-50%+15px)] top-4 h-px ${state==='done' ? 'bg-emerald-400/60' : 'bg-zinc-800'}`}/>}</div>)}</div></section>
 
     <section className="px-3 pb-28 pt-3">
-      {tab === 'chat' && <ChatPanel projectId={project.id} initialMessages={initialMessages} initialProposal={initialProposal} onProposalGenerated={proposalGenerated} onReviewChanges={reviewFromChat} />}
+      <div className={tab === 'chat' ? '' : 'hidden'}><ChatPanel projectId={project.id} initialMessages={initialMessages} initialProposal={initialProposal} onProposalGenerated={proposalGenerated} onReviewChanges={reviewFromChat} appliedSignal={appliedCount} /></div>
       {tab === 'code' && <WorkspacePanel projectId={project.id} refreshKey={workspaceRefresh} autoReview={autoReview} activeTab={workspaceTab} initialTab="code" onApplied={proposalApplied} />}
       {tab === 'files' && <WorkspacePanel projectId={project.id} refreshKey={workspaceRefresh} autoReview={autoReview} activeTab="files" initialTab="files" onApplied={proposalApplied} />}
       {tab === 'tools' && <ToolsPanel projectId={project.id} projectName={project.name} connected={githubConnected} repoUrl={project.github_repo_url ?? null} />}

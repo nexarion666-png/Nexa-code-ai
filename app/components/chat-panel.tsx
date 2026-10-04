@@ -19,6 +19,17 @@ function Markdown({ content }: { content: string }) {
   })}</div>;
 }
 
+// A saved [PROPOSAL_READY] marker only counts if no proposal was generated after it.
+function hasPendingProposalMarker(messages: Message[]) {
+  let marker = -1; let generated = -1;
+  messages.forEach((m, i) => {
+    if (m.role !== 'assistant') return;
+    if (m.content.includes('[PROPOSAL_READY]')) marker = i;
+    if (m.content.startsWith('Proposal ready')) generated = i;
+  });
+  return marker > generated;
+}
+
 function sseParser() {
   let buffer = '';
   return {
@@ -31,7 +42,7 @@ function sseParser() {
   };
 }
 
-export function ChatPanel({ projectId, initialMessages, initialProposal, onProposalGenerated, onReviewChanges }: { projectId: string; initialMessages: Message[]; initialProposal?: { id: string; status: string; changesCount: number } | null; onProposalGenerated?: (proposalId: string) => void; onReviewChanges?: () => void }) {
+export function ChatPanel({ projectId, initialMessages, initialProposal, onProposalGenerated, onReviewChanges, appliedSignal = 0 }: { projectId: string; initialMessages: Message[]; initialProposal?: { id: string; status: string; changesCount: number } | null; onProposalGenerated?: (proposalId: string) => void; onReviewChanges?: () => void; appliedSignal?: number }) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -41,7 +52,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   const [keysExhausted, setKeysExhausted] = useState<{ tried: any[]; message: string; retryAfter: number } | null>(null);
   const [retryCountdown, setRetryCountdown] = useState(0);
   const [mode, setMode] = useState<'conversation' | 'agent'>('conversation');
-  const [proposalReady, setProposalReady] = useState(initialMessages.some(m => m.role === 'assistant' && m.content.includes('[PROPOSAL_READY]')));
+  const [proposalReady, setProposalReady] = useState(hasPendingProposalMarker(initialMessages));
   const [proposalId, setProposalId] = useState(initialProposal?.status === 'pending' ? initialProposal.id : '');
   const [changesCount, setChangesCount] = useState(initialProposal?.status === 'pending' ? initialProposal.changesCount : 0);
   const endRef = useRef<HTMLDivElement>(null);
@@ -49,6 +60,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   const history = useMemo(() => messages.map(({role,content})=>({role,content})), [messages]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: streaming ? 'auto' : 'smooth' }); }, [messages, streaming]);
+  useEffect(() => { if (appliedSignal > 0) { setProposalId(''); setChangesCount(0); } }, [appliedSignal]);
   useEffect(() => {
     if (!keysExhausted) return;
     setRetryCountdown(keysExhausted.retryAfter);
