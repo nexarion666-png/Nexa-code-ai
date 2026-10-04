@@ -257,11 +257,13 @@ export async function streamWithFailover({
   provider: Provider;
   messages: AIMessage[];
   keys: string[];
-  keysByProvider?: Record<Provider, FailoverKeyInput[]>;
+  keysByProvider?: Record<Provider, string[] | FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
   isChat?: boolean;
 }): Promise<void> {
-  const allKeys: Record<Provider, FailoverKeyInput[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
+  const allKeys: Record<Provider, FailoverKeyInput[]> = keysByProvider
+    ? { gemini: keysByProvider.gemini ?? [], groq: keysByProvider.groq ?? [], openrouter: keysByProvider.openrouter ?? [] }
+    : { gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = keys.slice(0, 3);
   const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat });
   const reader = stream.getReader();
