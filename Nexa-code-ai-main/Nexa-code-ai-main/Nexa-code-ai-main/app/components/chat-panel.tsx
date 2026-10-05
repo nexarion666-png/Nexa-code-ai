@@ -19,17 +19,6 @@ function Markdown({ content }: { content: string }) {
   })}</div>;
 }
 
-// A saved [PROPOSAL_READY] marker only counts if no proposal was generated after it.
-function hasPendingProposalMarker(messages: Message[]) {
-  let marker = -1; let generated = -1;
-  messages.forEach((m, i) => {
-    if (m.role !== 'assistant') return;
-    if (m.content.includes('[PROPOSAL_READY]')) marker = i;
-    if (m.content.startsWith('Proposal ready')) generated = i;
-  });
-  return marker > generated;
-}
-
 function sseParser() {
   let buffer = '';
   return {
@@ -42,7 +31,7 @@ function sseParser() {
   };
 }
 
-export function ChatPanel({ projectId, initialMessages, initialProposal, onProposalGenerated, onReviewChanges, appliedSignal = 0 }: { projectId: string; initialMessages: Message[]; initialProposal?: { id: string; status: string; changesCount: number } | null; onProposalGenerated?: (proposalId: string) => void; onReviewChanges?: () => void; appliedSignal?: number }) {
+export function ChatPanel({ projectId, initialMessages, initialProposal, onProposalGenerated, onReviewChanges }: { projectId: string; initialMessages: Message[]; initialProposal?: { id: string; status: string; changesCount: number } | null; onProposalGenerated?: (proposalId: string) => void; onReviewChanges?: () => void }) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -52,7 +41,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   const [keysExhausted, setKeysExhausted] = useState<{ tried: any[]; message: string; retryAfter: number } | null>(null);
   const [retryCountdown, setRetryCountdown] = useState(0);
   const [mode, setMode] = useState<'conversation' | 'agent'>('conversation');
-  const [proposalReady, setProposalReady] = useState(hasPendingProposalMarker(initialMessages));
+  const [proposalReady, setProposalReady] = useState(initialMessages.some(m => m.role === 'assistant' && m.content.includes('[PROPOSAL_READY]')));
   const [proposalId, setProposalId] = useState(initialProposal?.status === 'pending' ? initialProposal.id : '');
   const [changesCount, setChangesCount] = useState(initialProposal?.status === 'pending' ? initialProposal.changesCount : 0);
   const endRef = useRef<HTMLDivElement>(null);
@@ -60,7 +49,6 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   const history = useMemo(() => messages.map(({role,content})=>({role,content})), [messages]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: streaming ? 'auto' : 'smooth' }); }, [messages, streaming]);
-  useEffect(() => { if (appliedSignal > 0) { setProposalId(''); setChangesCount(0); } }, [appliedSignal]);
   useEffect(() => {
     if (!keysExhausted) return;
     setRetryCountdown(keysExhausted.retryAfter);
@@ -97,32 +85,58 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
 
   async function generateProposal() {
     if (generating || streaming || (!proposalReady && mode !== 'agent')) return;
-    setGenerating(true); setError('');
+    if (keysExhausted && retryCountdown > 0) return;
+    setGenerating(true);
+    setError('');
+    setKeysExhausted(null);
+    setRetryCountdown(0);
     try {
       const response = await fetch('/api/generate-proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId, history }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Nexa could not generate a proposal.');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (data.error === 'KEYS_EXHAUSTED') {
+          const retryAfter = Number(data.retryAfter ?? 60);
+          setKeysExhausted({ tried: Array.isArray(data.tried) ? data.tried : [], message: String(data.message ?? 'All AI providers are temporarily unavailable.'), retryAfter });
+          window.dispatchEvent(new CustomEvent('nexa-ai-status', { detail: 'exhausted' }));
+          return;
+        }
+        throw new Error(data.error || 'Nexa could not generate a proposal.');
+      }
+      setKeysExhausted(null);
+      setRetryCountdown(0);
+      setError('');
       const summary = `Proposal ready: ${data.changesCount} ${data.changesCount === 1 ? 'file' : 'files'} to modify.`;
       setMessages(prev => [...prev, { role: 'assistant', content: summary, created_at: new Date().toISOString() }]);
-      setProposalId(data.proposalId); setChangesCount(data.changesCount ?? 0); setProposalReady(false);
+      setProposalId(data.proposalId);
+      setChangesCount(data.changesCount ?? 0);
+      setProposalReady(false);
       onProposalGenerated?.(data.proposalId);
-    } catch (e) { setError(e instanceof Error ? e.message : 'Nexa could not generate a proposal.'); }
-    finally { setGenerating(false); }
+      window.dispatchEvent(new CustomEvent('nexa-ai-status', { detail: 'primary' }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Nexa could not generate a proposal.');
+    } finally {
+      setGenerating(false);
+    }
   }
 
   return <div className="space-y-3 pb-52">
     {messages.length === 0 && <article className="rounded-3xl border border-zinc-800 bg-[#10131f] p-5"><div className="flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200"><Sparkles size={21}/></div><div><div className="font-semibold text-indigo-100">NEXA</div><p className="mt-2 text-sm leading-6 text-zinc-400">Tell me what you want to build. I’ll ask the important questions about requirements, stack, features, and design before proposing anything.</p></div></div></article>}
     {messages.map((message,i)=><article key={message.id ?? `${message.created_at}-${i}`} className={`rounded-3xl border border-zinc-800 p-4 ${message.role==='assistant'?'bg-[#10131f]':'bg-[#0d1425]'}`}><div className="flex gap-3"><div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${message.role==='assistant'?'bg-violet-500/20 text-violet-200':'bg-indigo-500/20 text-indigo-200'}`}>{message.role==='assistant'?<Sparkles size={20}/>:<span className="text-xs font-bold">You</span>}</div><div className="min-w-0 flex-1"><div className="mb-2 flex items-center justify-between"><span className="font-semibold text-indigo-100">{message.role==='assistant'?'NEXA':'You'}</span><span className="text-[10px] text-zinc-600">{message.created_at ? new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : ''}</span></div>{message.content ? <Markdown content={message.content}/> : streaming && <div className="flex items-center gap-1 py-2"><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:120ms]"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:240ms]"/></div>}</div></div></article>)}
-    {keysExhausted && <div className="bg-red-500/10 border border-red-500 text-red-400 p-3 rounded">
-      <div>⚠️ All API keys exhausted — {keysExhausted.tried.map((item: any) => `${item.provider} (${item.keysTried ?? 0}/${item.keysTried ?? 0} keys hit rate limit)`).join(', ')}. Cooldown {retryCountdown}s active. Chat is on slow fallback. Add a key in Settings to restore speed.</div>
-      <div className="mt-2 flex items-center justify-between gap-2">
+    {keysExhausted && <div className="rounded-2xl border border-red-500/60 bg-red-500/10 p-3 text-red-300">
+      <div className="font-semibold">⚠️ AI providers temporarily unavailable</div>
+      <div className="mt-1 text-xs leading-5 text-red-200/80">
+        {keysExhausted.tried.length > 0
+          ? keysExhausted.tried.map((item: any) => `${item.provider}: ${item.lastError || 'unavailable'}${item.keysTried ? ` · ${item.keysTried} key${item.keysTried === 1 ? '' : 's'} tried` : ''}`).join(' · ')
+          : keysExhausted.message}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
         <Link href="/app/settings/ai-keys" className="font-semibold underline">Go to Settings → AI Keys</Link>
-        <span className="font-mono text-xs">{retryCountdown}s · auto-retry ready</span>
+        <span className="font-mono text-xs">{retryCountdown > 0 ? `Retry in ${retryCountdown}s` : 'Retry now'}</span>
       </div>
     </div>}
     {switchingProvider && <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 px-4 py-3 text-xs text-violet-200">Gemini is unavailable. Nexa is switching to {switchingProvider}…</div>}
-    {error && <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs leading-5 text-amber-200">{error}</div>}
-    {proposalReady && <button onClick={generateProposal} disabled={generating || (keysExhausted !== null && retryCountdown > 0)} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-400/50 bg-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_0_24px_rgba(139,92,246,.35)]">{generating ? <Loader2 size={17} className="animate-spin"/> : <GitCompareArrows size={17}/>}Generate Proposal</button>}
+    {error && !keysExhausted && <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs leading-5 text-amber-200">{error}</div>}
+    {proposalReady && <button onClick={generateProposal} disabled={generating || retryCountdown > 0} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-400/50 bg-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_0_24px_rgba(139,92,246,.35)] disabled:opacity-50">{generating ? <Loader2 size={17} className="animate-spin"/> : <GitCompareArrows size={17}/>} {generating ? 'Generating Proposal…' : retryCountdown > 0 ? `Retry in ${retryCountdown}s` : 'Generate Proposal'}</button>}
     {proposalId && changesCount > 0 && <button onClick={onReviewChanges} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-500/40 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-200"><GitCompareArrows size={17}/>Review Changes · {changesCount}</button>}
     <div ref={endRef}/>
 

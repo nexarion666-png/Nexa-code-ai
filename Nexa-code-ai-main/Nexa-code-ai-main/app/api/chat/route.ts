@@ -6,7 +6,36 @@ import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
 export const runtime = 'nodejs';
 
-const SYSTEM = `You are Nexa Code AI in Conversation Mode. You MUST ask clarifying questions about project requirements, tech stack, features, design before proposing. Do NOT write code yet. Goal is to understand fully. When you have enough info, output [PROPOSAL_READY] marker.`;
+const CONVERSATION_SYSTEM = `You are Nexa Code AI in Conversation Mode. Ask clarifying questions when the request is vague or important requirements are missing. Do NOT write code yet. When you have enough information, output [PROPOSAL_READY].`;
+
+const MAX_FILE_LIST = 60;
+const MAX_FILE_CHARS = 3200;
+const MAX_CONTEXT_CHARS = 24000;
+
+function isSpecificEditRequest(message: string): boolean {
+  const text = message.toLowerCase().trim();
+  if (!text) return false;
+  const editVerb = /\b(change|update|edit|modify|fix|make|adjust|tweak|replace|remove|delete|add|hide|show|rename|move|restyle|style|color|colour|resize|align|center|centre|improve|polish|swap)\b/i;
+  const concreteTarget = /\b(button|header|navbar|nav|footer|card|page|route|form|input|modal|menu|tab|icon|text|title|logo|background|border|font|color|colour|layout|spacing|padding|margin|wishlist|dashboard|login|signup|settings|github|deploy|preview)\b/i;
+  const broadBuild = /\b(build|create|generate|start|make me|new project|from scratch)\b/i;
+  return editVerb.test(text) && concreteTarget.test(text) && !broadBuild.test(text);
+}
+
+function buildProjectContext(files: { path: string; content: string | null }[]): string {
+  if (!files.length) return '\nNo project files exist yet.';
+  const list = files.slice(0, MAX_FILE_LIST).map(file => file.path).join('\n');
+  let remaining = MAX_CONTEXT_CHARS;
+  const excerpts: string[] = [];
+  for (const file of files) {
+    if (remaining <= 0) break;
+    const content = String(file.content ?? '');
+    if (!content) continue;
+    const excerpt = content.slice(0, Math.min(MAX_FILE_CHARS, remaining));
+    remaining -= excerpt.length;
+    excerpts.push(`---FILE: ${file.path}---\n${excerpt}${content.length > excerpt.length ? '\n[truncated]' : ''}`);
+  }
+  return `\nPROJECT FILE LIST:\n${list}${files.length > MAX_FILE_LIST ? `\n[${files.length - MAX_FILE_LIST} more files omitted]` : ''}\n\nPROJECT FILE CONTENT (capped excerpts):\n${excerpts.join('\n')}`;
+}
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -20,6 +49,19 @@ export async function POST(request: Request) {
 
   const { data: project } = await supabase.from('projects').select('id').eq('id', projectId).eq('user_id', user.id).single();
   if (!project) return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
+
+  const { data: projectFiles, error: projectFilesError } = await supabase
+    .from('project_files')
+    .select('path,content')
+    .eq('project_id', projectId)
+    .order('path');
+  if (projectFilesError) return NextResponse.json({ error: projectFilesError.message }, { status: 500 });
+  const existingFiles = (projectFiles ?? []) as { path: string; content: string | null }[];
+  const editMode = existingFiles.length > 0 && isSpecificEditRequest(message);
+  const projectContext = buildProjectContext(existingFiles);
+  const SYSTEM = editMode
+    ? `You are Nexa Code AI in EDIT MODE. The user has an existing project and made a concrete edit request. You can see the project file list and capped file excerpts below. Do not conduct a multi-question interview. If the request is implementable from the available context, respond with ONE concise plan sentence followed by [PROPOSAL_READY]. Ask a question only if a missing detail would materially change the implementation. Do not write code yet.${projectContext}`
+    : `${CONVERSATION_SYSTEM}${projectContext}`;
 
   const usageCheck = await checkUsageLimit(supabase, user, 'message');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily message limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited messages.`, usage: usageCheck.usage }, { status: 429 });
@@ -87,7 +129,7 @@ export async function POST(request: Request) {
         }
         const { error: saveAssistantError } = await supabase.from('messages').insert({ project_id: projectId, user_id: user.id, role: 'assistant', content: full });
         if (saveAssistantError) send({ type: 'warning', message: 'Response streamed, but Nexa could not save it to history.' });
-        send({ type: 'done', proposalReady: full.includes('[PROPOSAL_READY]') });
+        send({ type: 'done', proposalReady: editMode || full.includes('[PROPOSAL_READY]') });
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
         if (raw.startsWith('KEYS_EXHAUSTED::')) {
