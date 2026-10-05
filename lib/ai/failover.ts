@@ -2,9 +2,9 @@ export type Provider = 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  gemini: ['gemini-3-flash', 'gemini-3-flash-preview'],
-  groq: ['llama-3.3-70b-versatile'],
-  openrouter: ['google/gemini-2.0-flash-001'],
+  gemini: ['gemini-3-flash-preview'],
+  groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+  openrouter: ['google/gemini-3-flash-preview'],
 };
 
 export class ProviderError extends Error {
