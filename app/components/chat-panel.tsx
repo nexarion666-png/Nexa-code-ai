@@ -20,6 +20,10 @@ function Markdown({ content }: { content: string }) {
 }
 
 // A saved [PROPOSAL_READY] marker only counts if no proposal was generated after it.
+function isConcreteEditRequest(text: string) {
+  return /\b(fix|debug|repair|resolve|solve|error|bug|broken|crash|fails?|failing|not working|doesn'?t work|issue|problem|change|modify|update|replace|remove|delete|rename|adjust|make|add|improve|refactor|restore|decode|encode|deploy|build|vercel|typescript|json|package\.json|compile|compilation|runtime)\b/i.test(text);
+}
+
 function hasPendingProposalMarker(messages: Message[]) {
   let marker = -1; let generated = -1;
   messages.forEach((m, i) => {
@@ -69,11 +73,13 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   }, [keysExhausted]);
   useEffect(() => {
     if (retryCountdown !== 0 || !keysExhausted || streaming || generating) return;
-    setKeysExhausted(null);
+    setKeysExhausted(null); setError('');
   }, [retryCountdown, keysExhausted, streaming, generating]);
 
   async function send() {
     const text = input.trim(); if (!text || streaming || generating) return;
+    const editRequest = isConcreteEditRequest(text);
+    setMode(editRequest ? 'agent' : 'conversation');
     setInput(''); setError(''); setKeysExhausted(null); setSwitchingProvider(''); setStreaming(true);
     const userMessage: Message = { role: 'user', content: text, created_at: new Date().toISOString() };
     const assistantMessage: Message = { role: 'assistant', content: '', created_at: new Date().toISOString() };
@@ -86,11 +92,11 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
         if(event.type==='chunk'){ window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:switchingProvider==='groq'?'fallback':'primary'})); } if(event.type==='chunk') setMessages(prev=>{const copy=[...prev]; const last=copy[copy.length-1]; if(last?.role==='assistant') copy[copy.length-1]={...last,content:last.content+event.text}; return copy;});
         if(event.type==='done'){ done=true; setSwitchingProvider(''); if(event.proposalReady) setProposalReady(true); }
         if(event.type==='switching'){ setSwitchingProvider(event.provider); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:event.provider==='groq'?'fallback':'primary'})); }
-        if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All keys exhausted',retryAfter:event.retryAfter ?? 60}); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
+        if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All keys exhausted',retryAfter:event.retryAfter ?? 60}); setError(''); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
         if(event.type==='error') throw new Error(event.message);
         if(event.type==='warning') setError(event.message);
       }}
-    } catch(e) { const msg=e instanceof Error?e.message:'Something went wrong.'; setError(msg); setMessages(prev=>prev[prev.length-1]?.role==='assistant' && !prev[prev.length-1].content ? prev.slice(0,-1) : prev); }
+    } catch(e) { const msg=e instanceof Error?e.message:'Something went wrong.'; if(msg !== 'KEYS_EXHAUSTED') setError(msg); setMessages(prev=>prev[prev.length-1]?.role==='assistant' && !prev[prev.length-1].content ? prev.slice(0,-1) : prev); }
     finally { setStreaming(false); setSwitchingProvider(''); setTimeout(()=>inputRef.current?.focus(), 50); }
   }
 
@@ -110,7 +116,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   }
 
   return <div className="space-y-3 pb-52">
-    {messages.length === 0 && <article className="rounded-3xl border border-zinc-800 bg-[#10131f] p-5"><div className="flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200"><Sparkles size={21}/></div><div><div className="font-semibold text-indigo-100">NEXA</div><p className="mt-2 text-sm leading-6 text-zinc-400">Tell me what you want to build. I’ll ask the important questions about requirements, stack, features, and design before proposing anything.</p></div></div></article>}
+    {messages.length === 0 && <article className="rounded-3xl border border-zinc-800 bg-[#10131f] p-5"><div className="flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200"><Sparkles size={21}/></div><div><div className="font-semibold text-indigo-100">NEXA</div><p className="mt-2 text-sm leading-6 text-zinc-400">Tell me what you want to build, fix, or improve. Nexa can inspect this project's files and will only ask questions when something is genuinely unclear.</p></div></div></article>}
     {messages.map((message,i)=><article key={message.id ?? `${message.created_at}-${i}`} className={`rounded-3xl border border-zinc-800 p-4 ${message.role==='assistant'?'bg-[#10131f]':'bg-[#0d1425]'}`}><div className="flex gap-3"><div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${message.role==='assistant'?'bg-violet-500/20 text-violet-200':'bg-indigo-500/20 text-indigo-200'}`}>{message.role==='assistant'?<Sparkles size={20}/>:<span className="text-xs font-bold">You</span>}</div><div className="min-w-0 flex-1"><div className="mb-2 flex items-center justify-between"><span className="font-semibold text-indigo-100">{message.role==='assistant'?'NEXA':'You'}</span><span className="text-[10px] text-zinc-600">{message.created_at ? new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : ''}</span></div>{message.content ? <Markdown content={message.content}/> : streaming && <div className="flex items-center gap-1 py-2"><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:120ms]"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:240ms]"/></div>}</div></div></article>)}
     {keysExhausted && <div className="bg-red-500/10 border border-red-500 text-red-400 p-3 rounded">
       <div>⚠️ All API keys exhausted — {keysExhausted.tried.map((item: any) => `${item.provider} (${item.keysTried ?? 0}/${item.keysTried ?? 0} keys hit rate limit)`).join(', ')}. Cooldown {retryCountdown}s active. Chat is on slow fallback. Add a key in Settings to restore speed.</div>
@@ -127,7 +133,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
 
     <div className="fixed bottom-[65px] left-0 right-0 z-40 w-full px-3 pb-2">
       <div className="rounded-[24px] border border-violet-500/80 bg-[#0b1021]/96 p-2 shadow-[0_0_35px_rgba(76,29,149,.45)] backdrop-blur-xl">
-        <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-indigo-300"><Sparkles size={14}/><span>Conversation Mode · Nexa asks before building</span></div>
+        <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-indigo-300"><Sparkles size={14}/><span>{mode === 'agent' ? 'Edit Mode · Nexa can inspect your project and prepare changes' : 'Conversation Mode · Nexa asks before building'}</span></div>
         <div className="px-2 pb-1 pt-2"><input ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}} placeholder="Tell Nexa what to build, fix, or improve..." className="w-full bg-transparent text-sm text-zinc-100 outline-none placeholder:text-zinc-500" disabled={streaming || generating}/></div>
         <div className="flex items-center gap-2 px-1 pb-1 pt-1"><button className="grid h-11 w-11 place-items-center rounded-full bg-zinc-900 text-zinc-300"><Plus/></button><button className="grid h-11 w-11 place-items-center rounded-full bg-zinc-900 text-zinc-300"><Paperclip/></button><button className="hidden h-11 items-center gap-1.5 rounded-full bg-zinc-900 px-4 text-sm text-zinc-200 sm:flex"><AtSign size={17}/>Files</button><button onClick={() => { setMode('agent'); setProposalReady(true); void generateProposal(); }} disabled={streaming || generating} className="ml-auto flex h-11 items-center gap-2 rounded-full border border-violet-500/80 bg-violet-500/10 px-4 text-sm text-violet-200 disabled:opacity-40"><Bot size={18}/>Agent</button><button onClick={send} disabled={streaming || generating || !input.trim()} className="grid h-11 w-11 place-items-center rounded-full bg-white text-black shadow-[0_0_22px_rgba(139,92,246,.65)] disabled:opacity-40"><Send size={19} fill="currentColor"/></button></div>
       </div>

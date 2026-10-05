@@ -6,7 +6,64 @@ import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
 export const runtime = 'nodejs';
 
-const SYSTEM = `You are Nexa Code AI in Conversation Mode. You MUST ask clarifying questions about project requirements, tech stack, features, design before proposing. Do NOT write code yet. Goal is to understand fully. When you have enough info, output [PROPOSAL_READY] marker.`;
+const BASE_SYSTEM = `You are Nexa Code AI, a senior full-stack engineer working inside an existing project.
+You can inspect the project's current file list and capped file contents supplied in the prompt.
+Use that context to answer accurately about the actual codebase. Never ask the user to paste a project file that is already available in the supplied context.
+
+For a concrete edit or bug-fix request, use EDIT MODE: do not run a long requirements interview. Give a concise one-line plan based on the existing code, mention the relevant file(s) when useful, then output [PROPOSAL_READY]. Do not write replacement code in Conversation Mode.
+
+For vague, ambiguous, or new-build requests, use CONVERSATION MODE: ask only the minimum questions needed to remove meaningful ambiguity. When requirements are sufficiently clear, output [PROPOSAL_READY].
+
+If the user provides a build/deployment/runtime error, treat it as a concrete bug-fix request when the existing project context is sufficient to diagnose it. Inspect the relevant existing files before asking for anything.
+
+Never claim you inspected a file unless it is present in the supplied project context.`;
+
+function isConcreteEditRequest(text: string): boolean {
+  return /\b(fix|debug|repair|resolve|solve|error|bug|broken|crash|fails?|failing|not working|doesn'?t work|issue|problem|change|modify|update|replace|remove|delete|rename|adjust|make|add|improve|refactor|restore|decode|encode|deploy|build|vercel|typescript|json|package\.json|compile|compilation|runtime)\b/i.test(text);
+}
+
+function buildProjectContext(
+  files: { path: string; content: string | null }[],
+  request: string,
+): string {
+  if (!files.length) return '\n\nPROJECT FILES: The project currently has no stored files.\n';
+
+  const lower = request.toLowerCase();
+  const priority = (path: string) => {
+    const p = path.toLowerCase();
+    let score = 0;
+    if (/package\.json$/.test(p)) score += 100;
+    if (/vercel\.json$/.test(p)) score += 90;
+    if (/tsconfig|next\.config|tailwind\.config/.test(p)) score += 70;
+    if (/route\.(ts|js)$|page\.(tsx|jsx)$/.test(p)) score += 30;
+    for (const token of lower.match(/[a-z0-9_.-]{3,}/g) ?? []) if (p.includes(token)) score += 8;
+    return score;
+  };
+
+  const ordered = [...files]
+    .filter(file => !/^\.env(?:\.|$)/i.test(file.path) && !file.path.includes('node_modules'))
+    .sort((a, b) => priority(b.path) - priority(a.path) || a.path.localeCompare(b.path));
+
+  const maxFiles = isConcreteEditRequest(request) ? 24 : 16;
+  const maxTotal = isConcreteEditRequest(request) ? 18000 : 9000;
+  const perFile = isConcreteEditRequest(request) ? 1400 : 700;
+  let total = 0;
+  const selected: string[] = [];
+  const list = ordered.map(file => file.path).join(', ');
+
+  for (const file of ordered.slice(0, maxFiles)) {
+    if (total >= maxTotal) break;
+    const raw = file.content ?? '';
+    if (!raw) continue;
+    const remaining = maxTotal - total;
+    const excerpt = raw.slice(0, Math.min(perFile, remaining));
+    const suffix = raw.length > excerpt.length ? '\n...[content capped]...' : '';
+    selected.push(`---PROJECT FILE: ${file.path}---\n${excerpt}${suffix}`);
+    total += excerpt.length;
+  }
+
+  return `\n\nPROJECT FILE LIST (${files.length} total): ${list}\n\nCAPPED PROJECT CONTENT (inspect these before asking the user for files):\n${selected.join('\n')}\n`;
+}
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -20,6 +77,16 @@ export async function POST(request: Request) {
 
   const { data: project } = await supabase.from('projects').select('id').eq('id', projectId).eq('user_id', user.id).single();
   if (!project) return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
+
+  const editRequest = isConcreteEditRequest(message);
+  const { data: projectFiles, error: projectFilesError } = await supabase
+    .from('project_files')
+    .select('path,content')
+    .eq('project_id', projectId)
+    .order('path');
+  if (projectFilesError) return NextResponse.json({ error: projectFilesError.message }, { status: 500 });
+  const projectContext = buildProjectContext((projectFiles ?? []) as { path: string; content: string | null }[], message);
+  const systemPrompt = `${BASE_SYSTEM}\n\nCURRENT MODE: ${editRequest ? 'EDIT MODE' : 'CONVERSATION MODE'}.\n${editRequest ? 'This request is concrete enough to inspect the existing project and prepare a proposal without an interview.' : 'Ask only necessary clarifying questions if the request is ambiguous.'}${projectContext}`;
 
   const usageCheck = await checkUsageLimit(supabase, user, 'message');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily message limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited messages.`, usage: usageCheck.usage }, { status: 429 });
@@ -42,13 +109,13 @@ export async function POST(request: Request) {
     const candidate = m as { role?: unknown; content?: unknown };
     return (candidate.role === 'user' || candidate.role === 'assistant') && typeof candidate.content === 'string';
   }).map((m: { role: 'user' | 'assistant'; content: string }) => ({ role: m.role, content: m.content }));
-  const messages: AIMessage[] = [{ role: 'system', content: SYSTEM }, ...safeHistory, { role: 'user', content: message }];
+  const messages: AIMessage[] = [{ role: 'system', content: systemPrompt }, ...safeHistory, { role: 'user', content: message }];
 
   const { error: saveUserError } = await supabase.from('messages').insert({ project_id: projectId, user_id: user.id, role: 'user', content: message });
   if (saveUserError) return NextResponse.json({ error: saveUserError.message }, { status: 500 });
 
   const encoder = new TextEncoder();
-  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: SYSTEM, isChat: true });
+  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: systemPrompt, isChat: true });
   const reader = failoverStream.getReader();
   let first: ReadableStreamReadResult<string>;
   try {

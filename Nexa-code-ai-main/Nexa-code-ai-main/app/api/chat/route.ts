@@ -6,35 +6,63 @@ import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
 export const runtime = 'nodejs';
 
-const CONVERSATION_SYSTEM = `You are Nexa Code AI in Conversation Mode. Ask clarifying questions when the request is vague or important requirements are missing. Do NOT write code yet. When you have enough information, output [PROPOSAL_READY].`;
+const BASE_SYSTEM = `You are Nexa Code AI, a senior full-stack engineer working inside an existing project.
+You can inspect the project's current file list and capped file contents supplied in the prompt.
+Use that context to answer accurately about the actual codebase. Never ask the user to paste a project file that is already available in the supplied context.
 
-const MAX_FILE_LIST = 60;
-const MAX_FILE_CHARS = 3200;
-const MAX_CONTEXT_CHARS = 24000;
+For a concrete edit or bug-fix request, use EDIT MODE: do not run a long requirements interview. Give a concise one-line plan based on the existing code, mention the relevant file(s) when useful, then output [PROPOSAL_READY]. Do not write replacement code in Conversation Mode.
 
-function isSpecificEditRequest(message: string): boolean {
-  const text = message.toLowerCase().trim();
-  if (!text) return false;
-  const editVerb = /\b(change|update|edit|modify|fix|make|adjust|tweak|replace|remove|delete|add|hide|show|rename|move|restyle|style|color|colour|resize|align|center|centre|improve|polish|swap)\b/i;
-  const concreteTarget = /\b(button|header|navbar|nav|footer|card|page|route|form|input|modal|menu|tab|icon|text|title|logo|background|border|font|color|colour|layout|spacing|padding|margin|wishlist|dashboard|login|signup|settings|github|deploy|preview)\b/i;
-  const broadBuild = /\b(build|create|generate|start|make me|new project|from scratch)\b/i;
-  return editVerb.test(text) && concreteTarget.test(text) && !broadBuild.test(text);
+For vague, ambiguous, or new-build requests, use CONVERSATION MODE: ask only the minimum questions needed to remove meaningful ambiguity. When requirements are sufficiently clear, output [PROPOSAL_READY].
+
+If the user provides a build/deployment/runtime error, treat it as a concrete bug-fix request when the existing project context is sufficient to diagnose it. Inspect the relevant existing files before asking for anything.
+
+Never claim you inspected a file unless it is present in the supplied project context.`;
+
+function isConcreteEditRequest(text: string): boolean {
+  return /\b(fix|debug|repair|resolve|solve|error|bug|broken|crash|fails?|failing|not working|doesn'?t work|issue|problem|change|modify|update|replace|remove|delete|rename|adjust|make|add|improve|refactor|restore|decode|encode|deploy|build|vercel|typescript|json|package\.json|compile|compilation|runtime)\b/i.test(text);
 }
 
-function buildProjectContext(files: { path: string; content: string | null }[]): string {
-  if (!files.length) return '\nNo project files exist yet.';
-  const list = files.slice(0, MAX_FILE_LIST).map(file => file.path).join('\n');
-  let remaining = MAX_CONTEXT_CHARS;
-  const excerpts: string[] = [];
-  for (const file of files) {
-    if (remaining <= 0) break;
-    const content = String(file.content ?? '');
-    if (!content) continue;
-    const excerpt = content.slice(0, Math.min(MAX_FILE_CHARS, remaining));
-    remaining -= excerpt.length;
-    excerpts.push(`---FILE: ${file.path}---\n${excerpt}${content.length > excerpt.length ? '\n[truncated]' : ''}`);
+function buildProjectContext(
+  files: { path: string; content: string | null }[],
+  request: string,
+): string {
+  if (!files.length) return '\n\nPROJECT FILES: The project currently has no stored files.\n';
+
+  const lower = request.toLowerCase();
+  const priority = (path: string) => {
+    const p = path.toLowerCase();
+    let score = 0;
+    if (/package\.json$/.test(p)) score += 100;
+    if (/vercel\.json$/.test(p)) score += 90;
+    if (/tsconfig|next\.config|tailwind\.config/.test(p)) score += 70;
+    if (/route\.(ts|js)$|page\.(tsx|jsx)$/.test(p)) score += 30;
+    for (const token of lower.match(/[a-z0-9_.-]{3,}/g) ?? []) if (p.includes(token)) score += 8;
+    return score;
+  };
+
+  const ordered = [...files]
+    .filter(file => !/^\.env(?:\.|$)/i.test(file.path) && !file.path.includes('node_modules'))
+    .sort((a, b) => priority(b.path) - priority(a.path) || a.path.localeCompare(b.path));
+
+  const maxFiles = isConcreteEditRequest(request) ? 24 : 16;
+  const maxTotal = isConcreteEditRequest(request) ? 18000 : 9000;
+  const perFile = isConcreteEditRequest(request) ? 1400 : 700;
+  let total = 0;
+  const selected: string[] = [];
+  const list = ordered.map(file => file.path).join(', ');
+
+  for (const file of ordered.slice(0, maxFiles)) {
+    if (total >= maxTotal) break;
+    const raw = file.content ?? '';
+    if (!raw) continue;
+    const remaining = maxTotal - total;
+    const excerpt = raw.slice(0, Math.min(perFile, remaining));
+    const suffix = raw.length > excerpt.length ? '\n...[content capped]...' : '';
+    selected.push(`---PROJECT FILE: ${file.path}---\n${excerpt}${suffix}`);
+    total += excerpt.length;
   }
-  return `\nPROJECT FILE LIST:\n${list}${files.length > MAX_FILE_LIST ? `\n[${files.length - MAX_FILE_LIST} more files omitted]` : ''}\n\nPROJECT FILE CONTENT (capped excerpts):\n${excerpts.join('\n')}`;
+
+  return `\n\nPROJECT FILE LIST (${files.length} total): ${list}\n\nCAPPED PROJECT CONTENT (inspect these before asking the user for files):\n${selected.join('\n')}\n`;
 }
 
 export async function POST(request: Request) {
@@ -50,18 +78,15 @@ export async function POST(request: Request) {
   const { data: project } = await supabase.from('projects').select('id').eq('id', projectId).eq('user_id', user.id).single();
   if (!project) return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
 
+  const editRequest = isConcreteEditRequest(message);
   const { data: projectFiles, error: projectFilesError } = await supabase
     .from('project_files')
     .select('path,content')
     .eq('project_id', projectId)
     .order('path');
   if (projectFilesError) return NextResponse.json({ error: projectFilesError.message }, { status: 500 });
-  const existingFiles = (projectFiles ?? []) as { path: string; content: string | null }[];
-  const editMode = existingFiles.length > 0 && isSpecificEditRequest(message);
-  const projectContext = buildProjectContext(existingFiles);
-  const SYSTEM = editMode
-    ? `You are Nexa Code AI in EDIT MODE. The user has an existing project and made a concrete edit request. You can see the project file list and capped file excerpts below. Do not conduct a multi-question interview. If the request is implementable from the available context, respond with ONE concise plan sentence followed by [PROPOSAL_READY]. Ask a question only if a missing detail would materially change the implementation. Do not write code yet.${projectContext}`
-    : `${CONVERSATION_SYSTEM}${projectContext}`;
+  const projectContext = buildProjectContext((projectFiles ?? []) as { path: string; content: string | null }[], message);
+  const systemPrompt = `${BASE_SYSTEM}\n\nCURRENT MODE: ${editRequest ? 'EDIT MODE' : 'CONVERSATION MODE'}.\n${editRequest ? 'This request is concrete enough to inspect the existing project and prepare a proposal without an interview.' : 'Ask only necessary clarifying questions if the request is ambiguous.'}${projectContext}`;
 
   const usageCheck = await checkUsageLimit(supabase, user, 'message');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily message limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited messages.`, usage: usageCheck.usage }, { status: 429 });
@@ -84,13 +109,13 @@ export async function POST(request: Request) {
     const candidate = m as { role?: unknown; content?: unknown };
     return (candidate.role === 'user' || candidate.role === 'assistant') && typeof candidate.content === 'string';
   }).map((m: { role: 'user' | 'assistant'; content: string }) => ({ role: m.role, content: m.content }));
-  const messages: AIMessage[] = [{ role: 'system', content: SYSTEM }, ...safeHistory, { role: 'user', content: message }];
+  const messages: AIMessage[] = [{ role: 'system', content: systemPrompt }, ...safeHistory, { role: 'user', content: message }];
 
   const { error: saveUserError } = await supabase.from('messages').insert({ project_id: projectId, user_id: user.id, role: 'user', content: message });
   if (saveUserError) return NextResponse.json({ error: saveUserError.message }, { status: 500 });
 
   const encoder = new TextEncoder();
-  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: SYSTEM, isChat: true });
+  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: systemPrompt, isChat: true });
   const reader = failoverStream.getReader();
   let first: ReadableStreamReadResult<string>;
   try {
@@ -129,7 +154,7 @@ export async function POST(request: Request) {
         }
         const { error: saveAssistantError } = await supabase.from('messages').insert({ project_id: projectId, user_id: user.id, role: 'assistant', content: full });
         if (saveAssistantError) send({ type: 'warning', message: 'Response streamed, but Nexa could not save it to history.' });
-        send({ type: 'done', proposalReady: editMode || full.includes('[PROPOSAL_READY]') });
+        send({ type: 'done', proposalReady: full.includes('[PROPOSAL_READY]') });
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
         if (raw.startsWith('KEYS_EXHAUSTED::')) {
