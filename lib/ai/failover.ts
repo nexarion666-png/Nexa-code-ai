@@ -143,10 +143,14 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
+    const providerMessages = attempt.messages.map(message => ({ role: message.role, content: message.content }));
+    const completionLimit = attempt.provider === 'groq'
+      ? { max_completion_tokens: 4096 }
+      : { max_tokens: 4096 };
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model: attempt.model, messages: attempt.messages.map(message => ({ role: message.role, content: message.content })), stream: true, temperature: 0.2 }),
+      body: JSON.stringify({ model: attempt.model, messages: providerMessages, stream: true, temperature: 0.2, ...completionLimit }),
       signal: controller.signal,
     });
     await assertOk(response, attempt.provider);
@@ -168,7 +172,11 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
 }
 
 function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === 429 || /quota|rate.?limit|too many requests/i.test(error.message);
+  if (error instanceof ProviderError) {
+    if (error.status === 429) return true;
+    if (error.status === 402 && /credit|credits|billing|balance|fewer max_tokens/i.test(error.message)) return true;
+    return /quota|rate.?limit|too many requests/i.test(error.message);
+  }
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
 }
 
@@ -215,8 +223,8 @@ export function createStreamingFailover({
           providerTried.keysTried += 1;
           for (const model of models) {
             providerTried.modelsTried.push(model);
-            // Chat stays snappy (8s); proposals generate whole files, so allow longer gaps between events.
-            const attempt: Attempt = { provider, key, model, messages, systemPrompt, idleTimeoutMs: isChat ? 8_000 : 45_000 };
+            // Allow enough time for provider headers/first token; reset the timer on each streamed event.
+            const attempt: Attempt = { provider, key, model, messages, systemPrompt, idleTimeoutMs: isChat ? 20_000 : 45_000 };
             try {
               const safeKeyId = String(key.id || `${provider}-${providerTried.keysTried}`).slice(0, 6);
               console.log(`[STREAM TRY] ${provider} ${model} key=${safeKeyId}`);
