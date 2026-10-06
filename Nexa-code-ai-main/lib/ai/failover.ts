@@ -15,7 +15,6 @@ export class ProviderError extends Error {
 }
 
 export type FailoverKey = { id: string; value: string };
-export type FailoverKeyInput = FailoverKey | string;
 
 type Attempt = {
   provider: Provider;
@@ -41,18 +40,6 @@ export function getCooldownStatus(): CooldownStatus {
 
 function startCooldown(provider: Provider) {
   cooldownUntil[provider] = Date.now() + 60_000;
-}
-
-function normalizeKeys(provider: Provider, keys: FailoverKeyInput[]): FailoverKey[] {
-  return keys.map((key, index) => {
-    if (typeof key === 'string') {
-      return { id: `${provider}-${index + 1}`, value: key };
-    }
-    return {
-      id: typeof key?.id === 'string' && key.id ? key.id : `${provider}-${index + 1}`,
-      value: typeof key?.value === 'string' ? key.value : '',
-    };
-  }).filter(key => key.value.length > 0);
 }
 
 function modelsFor(provider: Provider): readonly string[] {
@@ -112,7 +99,7 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
           body: JSON.stringify({
             ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
             contents,
-            generationConfig: { temperature: 0.2 },
+            generationConfig: { temperature: 0.2, maxOutputTokens: 3072 },
           }),
           signal: controller.signal,
         },
@@ -142,14 +129,17 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
-    const providerMessages = attempt.messages.map(message => ({ role: message.role, content: message.content }));
-    const completionLimit = attempt.provider === 'groq'
-      ? { max_completion_tokens: 4096 }
-      : { max_tokens: 4096 };
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model: attempt.model, messages: providerMessages, stream: true, temperature: 0.2, ...completionLimit }),
+      body: JSON.stringify({
+        model: attempt.model,
+        messages: attempt.messages.map(message => ({ role: message.role, content: message.content })),
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 3072,
+        max_completion_tokens: 3072,
+      }),
       signal: controller.signal,
     });
     await assertOk(response, attempt.provider);
@@ -171,11 +161,7 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
 }
 
 function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) {
-    if (error.status === 429) return true;
-    if (error.status === 402 && /credit|credits|billing|balance|fewer max_tokens/i.test(error.message)) return true;
-    return /quota|rate.?limit|too many requests/i.test(error.message);
-  }
+  if (error instanceof ProviderError) return error.status === 429 || /quota|rate.?limit|too many requests/i.test(error.message);
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
 }
 
@@ -187,7 +173,7 @@ export function createStreamingFailover({
   isChat = false,
 }: {
   requestedProvider?: Provider;
-  keysByProvider: Record<string, FailoverKeyInput[]>;
+  keysByProvider: Record<string, FailoverKey[]>;
   messages: AIMessage[];
   systemPrompt?: string;
   isChat?: boolean;
@@ -202,12 +188,14 @@ export function createStreamingFailover({
       let lastErr = 'Unknown provider error';
 
       for (const provider of order) {
-        if ((cooldownUntil[provider] ?? 0) > Date.now()) {
-          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: 'Provider cooldown active' });
+        const cooldown = cooldownUntil[provider] ?? 0;
+        if (cooldown > Date.now()) {
+          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: `Provider cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s remaining)` });
+          lastErr = 'Provider cooldown active';
           continue;
         }
 
-        const keys = normalizeKeys(provider, keysByProvider[provider] ?? []);
+        const keys = keysByProvider[provider] ?? [];
         const models = modelsFor(provider);
         const providerTried = { provider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
 
@@ -224,8 +212,7 @@ export function createStreamingFailover({
             providerTried.modelsTried.push(model);
             const attempt: Attempt = { provider, key, model, messages, systemPrompt };
             try {
-              const safeKeyId = String(key.id || `${provider}-${providerTried.keysTried}`).slice(0, 6);
-              console.log(`[STREAM TRY] ${provider} ${model} key=${safeKeyId}`);
+              console.log(`[STREAM TRY] ${provider} ${model} key=${key.id.slice(0, 6)}`);
               const providerStream = callProviderStream(attempt);
               for await (const chunk of providerStream) controller.enqueue(chunk);
               controller.close();
@@ -260,20 +247,16 @@ export async function streamWithFailover({
   keys,
   keysByProvider,
   onChunk,
-  isChat = false,
 }: {
   provider: Provider;
   messages: AIMessage[];
   keys: string[];
-  keysByProvider?: Record<Provider, string[] | FailoverKey[]>;
+  keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
-  isChat?: boolean;
 }): Promise<void> {
-  const allKeys: Record<Provider, FailoverKeyInput[]> = keysByProvider
-    ? { gemini: keysByProvider.gemini ?? [], groq: keysByProvider.groq ?? [], openrouter: keysByProvider.openrouter ?? [] }
-    : { gemini: [], groq: [], openrouter: [] };
-  if (!keysByProvider) allKeys[provider] = keys.slice(0, 3);
-  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat });
+  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
+  if (!keysByProvider) allKeys[provider] = keys.slice(0, 3).map((value, index) => ({ id: `${provider}-${index + 1}`, value }));
+  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat: false });
   const reader = stream.getReader();
   try {
     while (true) {
