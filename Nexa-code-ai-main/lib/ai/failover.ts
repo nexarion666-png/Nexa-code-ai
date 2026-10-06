@@ -2,9 +2,9 @@ export type Provider = 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  gemini: ['gemini-3-flash', 'gemini-3-flash-preview'],
-  groq: ['llama-3.3-70b-versatile'],
-  openrouter: ['google/gemini-2.0-flash-001'],
+  gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
+  groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+  openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
 };
 
 export class ProviderError extends Error {
@@ -15,6 +15,7 @@ export class ProviderError extends Error {
 }
 
 export type FailoverKey = { id: string; value: string };
+export type FailoverKeyInput = FailoverKey | string;
 
 type Attempt = {
   provider: Provider;
@@ -22,6 +23,7 @@ type Attempt = {
   model: string;
   messages: AIMessage[];
   systemPrompt?: string;
+  idleTimeoutMs: number;
 };
 
 const cooldownUntil: Record<string, number> = {};
@@ -40,6 +42,18 @@ export function getCooldownStatus(): CooldownStatus {
 
 function startCooldown(provider: Provider) {
   cooldownUntil[provider] = Date.now() + 60_000;
+}
+
+function normalizeKeys(provider: Provider, keys: FailoverKeyInput[]): FailoverKey[] {
+  return keys.map((key, index) => {
+    if (typeof key === 'string') {
+      return { id: `${provider}-${index + 1}`, value: key };
+    }
+    return {
+      id: typeof key?.id === 'string' && key.id ? key.id : `${provider}-${index + 1}`,
+      value: typeof key?.value === 'string' ? key.value : '',
+    };
+  }).filter(key => key.value.length > 0);
 }
 
 function modelsFor(provider: Provider): readonly string[] {
@@ -79,10 +93,10 @@ async function* readSSE(body: ReadableStream<Uint8Array>, onActivity?: () => voi
 
 async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
   const controller = new AbortController();
-  let timeout = setTimeout(() => controller.abort(), 8_000);
+  let timeout = setTimeout(() => controller.abort(), attempt.idleTimeoutMs);
   const resetTimeout = () => {
     clearTimeout(timeout);
-    timeout = setTimeout(() => controller.abort(), 8_000);
+    timeout = setTimeout(() => controller.abort(), attempt.idleTimeoutMs);
   };
 
   try {
@@ -99,7 +113,7 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
           body: JSON.stringify({
             ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
             contents,
-            generationConfig: { temperature: 0.2, maxOutputTokens: 3072 },
+            generationConfig: { temperature: 0.2 },
           }),
           signal: controller.signal,
         },
@@ -129,17 +143,14 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
+    const providerMessages = attempt.messages.map(message => ({ role: message.role, content: message.content }));
+    const completionLimit = attempt.provider === 'groq'
+      ? { max_completion_tokens: 4096 }
+      : { max_tokens: 4096 };
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: attempt.model,
-        messages: attempt.messages.map(message => ({ role: message.role, content: message.content })),
-        stream: true,
-        temperature: 0.2,
-        max_tokens: 3072,
-        max_completion_tokens: 3072,
-      }),
+      body: JSON.stringify({ model: attempt.model, messages: providerMessages, stream: true, temperature: 0.2, ...completionLimit }),
       signal: controller.signal,
     });
     await assertOk(response, attempt.provider);
@@ -161,7 +172,11 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
 }
 
 function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === 429 || /quota|rate.?limit|too many requests/i.test(error.message);
+  if (error instanceof ProviderError) {
+    if (error.status === 429) return true;
+    if (error.status === 402 && /credit|credits|billing|balance|fewer max_tokens/i.test(error.message)) return true;
+    return /quota|rate.?limit|too many requests/i.test(error.message);
+  }
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
 }
 
@@ -173,7 +188,7 @@ export function createStreamingFailover({
   isChat = false,
 }: {
   requestedProvider?: Provider;
-  keysByProvider: Record<string, FailoverKey[]>;
+  keysByProvider: Record<string, FailoverKeyInput[]>;
   messages: AIMessage[];
   systemPrompt?: string;
   isChat?: boolean;
@@ -188,14 +203,12 @@ export function createStreamingFailover({
       let lastErr = 'Unknown provider error';
 
       for (const provider of order) {
-        const cooldown = cooldownUntil[provider] ?? 0;
-        if (cooldown > Date.now()) {
-          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: `Provider cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s remaining)` });
-          lastErr = 'Provider cooldown active';
+        if ((cooldownUntil[provider] ?? 0) > Date.now()) {
+          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: 'Provider cooldown active' });
           continue;
         }
 
-        const keys = keysByProvider[provider] ?? [];
+        const keys = normalizeKeys(provider, keysByProvider[provider] ?? []);
         const models = modelsFor(provider);
         const providerTried = { provider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
 
@@ -210,9 +223,11 @@ export function createStreamingFailover({
           providerTried.keysTried += 1;
           for (const model of models) {
             providerTried.modelsTried.push(model);
-            const attempt: Attempt = { provider, key, model, messages, systemPrompt };
+            // Allow enough time for provider headers/first token; reset the timer on each streamed event.
+            const attempt: Attempt = { provider, key, model, messages, systemPrompt, idleTimeoutMs: isChat ? 20_000 : 45_000 };
             try {
-              console.log(`[STREAM TRY] ${provider} ${model} key=${key.id.slice(0, 6)}`);
+              const safeKeyId = String(key.id || `${provider}-${providerTried.keysTried}`).slice(0, 6);
+              console.log(`[STREAM TRY] ${provider} ${model} key=${safeKeyId}`);
               const providerStream = callProviderStream(attempt);
               for await (const chunk of providerStream) controller.enqueue(chunk);
               controller.close();
@@ -247,16 +262,20 @@ export async function streamWithFailover({
   keys,
   keysByProvider,
   onChunk,
+  isChat = false,
 }: {
   provider: Provider;
   messages: AIMessage[];
   keys: string[];
-  keysByProvider?: Record<Provider, FailoverKey[]>;
+  keysByProvider?: Record<Provider, string[] | FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
+  isChat?: boolean;
 }): Promise<void> {
-  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
-  if (!keysByProvider) allKeys[provider] = keys.slice(0, 3).map((value, index) => ({ id: `${provider}-${index + 1}`, value }));
-  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat: false });
+  const allKeys: Record<Provider, FailoverKeyInput[]> = keysByProvider
+    ? { gemini: keysByProvider.gemini ?? [], groq: keysByProvider.groq ?? [], openrouter: keysByProvider.openrouter ?? [] }
+    : { gemini: [], groq: [], openrouter: [] };
+  if (!keysByProvider) allKeys[provider] = keys.slice(0, 3);
+  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat });
   const reader = stream.getReader();
   try {
     while (true) {
