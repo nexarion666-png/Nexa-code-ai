@@ -68,6 +68,14 @@ function ensureFile(files: { path: string; content: string }[], path: string, co
   if (!files.some(file => file.path === path)) files.push({ path, content });
 }
 
+function execMatches(content: string, pattern: RegExp): RegExpExecArray[] {
+  const matches: RegExpExecArray[] = [];
+  pattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) matches.push(match);
+  return matches;
+}
+
 function ensureNextProject(files: { path: string; content: string }[], existingProject: boolean) {
   if (!existingProject) {
     ensureFile(files, 'tsconfig.json', JSON.stringify({ compilerOptions: { target: 'ES2017', lib: ['dom', 'dom.iterable', 'esnext'], allowJs: false, skipLibCheck: true, strict: true, noEmit: true, esModuleInterop: true, module: 'esnext', moduleResolution: 'bundler', resolveJsonModule: true, isolatedModules: true, jsx: 'preserve', incremental: true, plugins: [{ name: 'next' }], paths: { '@/*': ['./*'] } }, include: ['next-env.d.ts', '**/*.ts', '**/*.tsx', '.next/types/**/*.ts'], exclude: ['node_modules'] }, null, 2) + '\n');
@@ -93,12 +101,14 @@ function ensureNextProject(files: { path: string; content: string }[], existingP
   for (const [name, version] of Object.entries(BASE_PACKAGE.devDependencies)) if (!pkg.devDependencies[name]) pkg.devDependencies[name] = version;
 
   const imported = new Set<string>();
-  for (const file of files) for (const match of file.content.matchAll(/(?:from|import)\s*["']([^"']+)["']/g)) {
+  for (const file of files) for (const match of execMatches(file.content, /(?:from|import)\s*["']([^"']+)["']/g)) {
     const spec = match[1];
     if (spec.startsWith('.') || spec.startsWith('@/') || spec.startsWith('node:')) continue;
     imported.add(spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]);
   }
-  for (const name of imported) if (!pkg.dependencies[name] && COMMON_DEPENDENCIES[name]) pkg.dependencies[name] = COMMON_DEPENDENCIES[name];
+  imported.forEach(name => {
+    if (!pkg.dependencies[name] && COMMON_DEPENDENCIES[name]) pkg.dependencies[name] = COMMON_DEPENDENCIES[name];
+  });
   const serialized = JSON.stringify(pkg, null, 2) + '\n';
   if (packageFile) packageFile.content = serialized; else files.push({ path: 'package.json', content: serialized });
 }
@@ -106,7 +116,7 @@ function ensureNextProject(files: { path: string; content: string }[], existingP
 function missingLocalImports(files: { path: string; content: string }[]) {
   const paths = new Set(files.map(file => file.path.replace(/\.(tsx?|jsx?|css|json)$/, '')));
   const missing = new Set<string>();
-  for (const file of files) for (const match of file.content.matchAll(/(?:from|import)\s*["']([^"']+)["']/g)) {
+  for (const file of files) for (const match of execMatches(file.content, /(?:from|import)\s*["']([^"']+)["']/g)) {
     const spec = match[1];
     let base = '';
     if (spec.startsWith('@/')) base = spec.slice(2);
@@ -117,7 +127,9 @@ function missingLocalImports(files: { path: string; content: string }[]) {
     base = base.replace(/\.(tsx?|jsx?|css|json)$/, '');
     if (!paths.has(base) && !paths.has(`${base}/index`)) missing.add(spec);
   }
-  return [...missing];
+  const result: string[] = [];
+  missing.forEach(value => result.push(value));
+  return result;
 }
 
 function routeExists(files: { path: string; content: string }[], route: string) {
@@ -138,7 +150,7 @@ function routeExists(files: { path: string; content: string }[], route: string) 
 function missingLinkedRoutes(files: { path: string; content: string }[]) {
   const routes = new Set<string>();
   for (const file of files) {
-    for (const match of file.content.matchAll(/(?:href|router\.(?:push|replace)|redirect)\s*[=(]\s*["'](\/[^"'#?]*)/g)) {
+    for (const match of execMatches(file.content, /(?:href|router\.(?:push|replace)|redirect)\s*[=(]\s*["'](\/[^"'#?]*)/g)) {
       const route = match[1];
       if (!route || route.startsWith('//') || route.startsWith('/api')) continue;
       routes.add(route);
