@@ -156,7 +156,11 @@ function missingLinkedRoutes(files: { path: string; content: string }[]) {
       routes.add(route);
     }
   }
-  return [...routes].filter(route => !routeExists(files, route));
+  const result: string[] = [];
+  routes.forEach(route => {
+    if (!routeExists(files, route)) result.push(route);
+  });
+  return result;
 }
 
 function validateProject(files: { path: string; content: string }[]) {
