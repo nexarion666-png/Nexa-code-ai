@@ -94,10 +94,11 @@ export async function POST(request: Request) {
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     if (raw.startsWith('KEYS_EXHAUSTED::')) {
-      const payload = raw.slice('KEYS_EXHAUSTED::'.length);
-      const separator = payload.lastIndexOf('::');
-      const triedJson = separator >= 0 ? payload.slice(0, separator) : payload;
-      const lastErr = separator >= 0 ? payload.slice(separator + 2) : 'All providers failed';
+      const marker = 'KEYS_EXHAUSTED::';
+      const payloadAndError = raw.slice(marker.length);
+      const separator = payloadAndError.lastIndexOf('::');
+      const triedJson = separator >= 0 ? payloadAndError.slice(0, separator) : payloadAndError;
+      const lastErr = separator >= 0 ? payloadAndError.slice(separator + 2) : 'All providers failed';
       let tried: unknown[] = [];
       try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
       console.error('[NEXA PROPOSAL KEYS_EXHAUSTED]', error);

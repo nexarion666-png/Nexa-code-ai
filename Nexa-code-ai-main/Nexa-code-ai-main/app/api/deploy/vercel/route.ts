@@ -14,7 +14,36 @@ export async function POST(request: Request) {
   let token:string; try{token=decryptApiKey(cred.vercel_token)}catch{return NextResponse.json({error:'Saved Vercel token is invalid. Reconnect it in settings.'},{status:400});}
   const {data:files,error:fe}=await supabase.from('project_files').select('path,content').eq('project_id',projectId).order('path');
   if(fe)return NextResponse.json({error:fe.message},{status:500}); if(!files?.length)return NextResponse.json({error:'Add some project files before deploying.'},{status:400});
-  const payload={name:String(project.name).toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`nexa-${projectId.slice(0,8)}`,files:files.map(f=>({file:f.path,data:f.content??''})),projectSettings:{framework:'nextjs'}};
+  // Vercel expects deployment file data as UTF-8 text. Do not Base64-encode it here.
+  // Also guarantee a Next.js project has a valid package.json before deployment.
+  const deploymentFiles = (files ?? []).map(file => ({
+    file: String(file.path).replace(/^\/+/, ''),
+    data: file.content ?? '',
+  }));
+
+  const packageIndex = deploymentFiles.findIndex(file => file.file === 'package.json');
+  if (packageIndex < 0) {
+    deploymentFiles.unshift({
+      file: 'package.json',
+      data: JSON.stringify({
+        name: String(project.name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 52) || `nexa-${projectId.slice(0, 8)}`,
+        private: true,
+        version: '0.1.0',
+        scripts: { dev: 'next dev', build: 'next build', start: 'next start' },
+        dependencies: { next: '14.2.15', react: '^18.3.1', 'react-dom': '^18.3.1' },
+      }, null, 2) + '\n',
+    });
+  } else {
+    // Fail early with a useful Nexa error if an existing package.json is malformed.
+    try { JSON.parse(deploymentFiles[packageIndex].data); }
+    catch { return NextResponse.json({ error: 'Project package.json is invalid. Regenerate or fix package.json before deploying.' }, { status: 400 }); }
+  }
+
+  const payload={
+    name:String(project.name).toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`nexa-${projectId.slice(0,8)}`,
+    files: deploymentFiles,
+    projectSettings:{framework:'nextjs'},
+  };
   const response=await fetch('https://api.vercel.com/v13/deployments',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(payload),cache:'no-store'});
   const raw=await response.text();
   let result: { url?: string; id?: string; readyState?: string; message?: string; error?: { message?: string } } = {};
