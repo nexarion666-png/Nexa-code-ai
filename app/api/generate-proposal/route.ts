@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
+import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -121,7 +122,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
   }
 
-  const files = parseFiles(generated);
+  const files = ensureCompleteNextProject(parseFiles(generated));
+  generated = serializeFileBlocks(files);
   if (!files.length) console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
   if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
 
