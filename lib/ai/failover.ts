@@ -2,9 +2,12 @@ export type Provider = 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  gemini: ['gemini-3-flash', 'gemini-3-flash-preview'],
-  groq: ['llama-3.3-70b-versatile'],
-  openrouter: ['google/gemini-2.0-flash-001'],
+  // Current production-capable Gemini API IDs. Keep the stable model first.
+  gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
+  // llama-3.3-70b-versatile was deprecated by Groq; use the current GPT-OSS models.
+  groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+  // OpenRouter model IDs are provider-qualified and currently available.
+  openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
 };
 
 export class ProviderError extends Error {
@@ -173,6 +176,12 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
   }
 }
 
+function isModelUnavailableError(error: unknown): boolean {
+  if (!(error instanceof ProviderError)) return false;
+  if (error.status === 404) return /model|endpoint|not found|no endpoints|unsupported/i.test(error.message);
+  return /model[_ -]?not[_ -]?found|no endpoints found|model .* not found|unsupported.*model/i.test(error.message);
+}
+
 function isCooldownError(error: unknown): boolean {
   if (error instanceof ProviderError) return error.status === 429 || /quota|rate.?limit|too many requests/i.test(error.message);
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
@@ -201,6 +210,7 @@ export function createStreamingFailover({
     async start(controller) {
       const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
       let lastErr = 'Unknown provider error';
+      const unavailableModels: Record<Provider, Set<string>> = { gemini: new Set(), groq: new Set(), openrouter: new Set() };
 
       for (const provider of order) {
         if ((cooldownUntil[provider] ?? 0) > Date.now()) {
@@ -215,6 +225,7 @@ export function createStreamingFailover({
         for (const key of keys) {
           providerTried.keysTried += 1;
           for (const model of models) {
+            if (unavailableModels[provider].has(model)) continue;
             providerTried.modelsTried.push(model);
             const attempt: Attempt = { provider, key, model, messages, systemPrompt, outputTokens: outputTokens ?? (isChat ? 3072 : 16384) };
             try {
@@ -230,6 +241,13 @@ export function createStreamingFailover({
               lastErr = error instanceof Error ? error.message : String(error);
               providerTried.lastError = lastErr;
               console.error(`[STREAM FAIL] ${provider} ${model}: ${lastErr}`);
+              if (isModelUnavailableError(error)) {
+                // A 404/model_not_found/no-endpoint is a model configuration problem,
+                // not a bad API key. Do not retry the same dead model with every key.
+                unavailableModels[provider].add(model);
+                controller.enqueue(`${SWITCH_PREFIX}${provider}`);
+                continue;
+              }
               if (isCooldownError(error)) {
                 startCooldown(provider);
                 controller.enqueue(`${SWITCH_PREFIX}${provider}`);
