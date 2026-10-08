@@ -47,7 +47,7 @@ function looksLikeNextProject(files: ProjectFile[]) {
       return true;
     }
   }
-  return files.some(file => /^app\/(layout|page)\.(tsx?|jsx?)$/.test(file.path) || /^pages\/(index|_app)\.(tsx?|jsx?)$/.test(file.path));
+  return files.some(file => /^(?:src\/)?app\/(layout|page)\.(tsx?|jsx?)$/.test(file.path) || /^(?:src\/)?pages\/(index|_app)\.(tsx?|jsx?)$/.test(file.path));
 }
 
 function validateJson(files: ProjectFile[]) {
@@ -80,31 +80,91 @@ function validateContents(files: ProjectFile[]) {
   }
 }
 
-function resolveLocalImport(fromPath: string, specifier: string, files: Set<string>) {
-  const base = specifier.startsWith('@/')
-    ? specifier.slice(2)
-    : specifier.startsWith('./') || specifier.startsWith('../')
-      ? normalizePath(`${fromPath.split('/').slice(0, -1).join('/')}/${specifier}`)
-      : null;
-  if (!base) return true;
-  const candidates = [
+function readPathAliases(files: ProjectFile[]) {
+  const aliases: Array<{ pattern: string; targets: string[] }> = [];
+  const tsconfig = get(files, 'tsconfig.json');
+  if (!tsconfig) return aliases;
+
+  try {
+    const config = JSON.parse(tsconfig.content) as {
+      compilerOptions?: {
+        baseUrl?: string;
+        paths?: Record<string, string[]>;
+      };
+    };
+    const baseUrl = config.compilerOptions?.baseUrl ?? '.';
+    const paths = config.compilerOptions?.paths ?? {};
+    Object.entries(paths).forEach(([pattern, targets]) => {
+      if (!Array.isArray(targets)) return;
+      aliases.push({
+        pattern,
+        targets: targets.map(target => normalizePath(`${baseUrl}/${target}`)),
+      });
+    });
+  } catch {
+    // Invalid tsconfig is reported by validateJson before this resolver is used.
+  }
+
+  return aliases;
+}
+
+function aliasMatches(pattern: string, specifier: string) {
+  if (pattern.endsWith('/*')) return specifier.startsWith(pattern.slice(0, -1));
+  return specifier === pattern;
+}
+
+function replaceAlias(pattern: string, target: string, specifier: string) {
+  if (pattern.endsWith('/*')) {
+    const prefix = pattern.slice(0, -1);
+    return target.endsWith('*')
+      ? `${target.slice(0, -1)}${specifier.slice(prefix.length)}`
+      : target;
+  }
+  return target;
+}
+
+function resolveCandidates(base: string) {
+  return [
     base,
     `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}.mjs`, `${base}.cjs`,
     `${base}.css`, `${base}.json`,
     `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`, `${base}/index.jsx`,
   ];
-  return candidates.some(candidate => files.has(normalizePath(candidate)));
+}
+
+function resolveLocalImport(fromPath: string, specifier: string, files: Set<string>, aliases: Array<{ pattern: string; targets: string[] }>) {
+  const bases: string[] = [];
+
+  if (specifier.startsWith('@/')) {
+    aliases.forEach(alias => {
+      if (!aliasMatches(alias.pattern, specifier)) return;
+      alias.targets.forEach(target => bases.push(replaceAlias(alias.pattern, target, specifier)));
+    });
+    // Support the common Nexa src-layout even when a generated tsconfig omitted
+    // the alias entry. The generated project's own tsconfig remains authoritative
+    // for the actual build; this fallback prevents a false validation failure when
+    // the files themselves clearly use the standard src/ structure.
+    if (!bases.length && files.has('src/app/layout.tsx')) bases.push(`src/${specifier.slice(2)}`);
+    if (!bases.length) bases.push(specifier.slice(2));
+  } else if (specifier.startsWith('./') || specifier.startsWith('../')) {
+    bases.push(normalizePath(`${fromPath.split('/').slice(0, -1).join('/')}/${specifier}`));
+  } else {
+    return true;
+  }
+
+  return bases.some(base => resolveCandidates(base).some(candidate => files.has(normalizePath(candidate))));
 }
 
 function validateLocalImports(files: ProjectFile[]) {
   const paths = new Set(files.map(file => file.path));
+  const aliases = readPathAliases(files);
   const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\()(['"])([^'"]+)\1/g;
   for (const file of files) {
     importPattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = importPattern.exec(file.content)) !== null) {
       const specifier = match[2];
-      if ((specifier.startsWith('@/') || specifier.startsWith('./') || specifier.startsWith('../')) && !resolveLocalImport(file.path, specifier, paths)) {
+      if ((specifier.startsWith('@/') || specifier.startsWith('./') || specifier.startsWith('../')) && !resolveLocalImport(file.path, specifier, paths, aliases)) {
         throw new ProjectCompletenessError(`Generated file ${file.path} imports missing local module ${specifier}.`);
       }
     }
@@ -113,75 +173,27 @@ function validateLocalImports(files: ProjectFile[]) {
 
 function validatePackage(files: ProjectFile[]) {
   const packageFile = get(files, 'package.json');
-  if (!packageFile) return files;
-
-  let pkg: {
-    dependencies?: Record<string, string>;
-    devDependencies?: Record<string, string>;
-  };
+  if (!packageFile) return;
+  let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
   try {
     pkg = JSON.parse(packageFile.content);
   } catch {
-    return files;
+    return;
   }
-
-  const dependencies = { ...(pkg.dependencies ?? {}) };
-  const devDependencies = { ...(pkg.devDependencies ?? {}) };
-  const declared = new Set([...Object.keys(dependencies), ...Object.keys(devDependencies)]);
-  const builtin = new Set([
-    'fs', 'path', 'url', 'crypto', 'http', 'https', 'os', 'stream', 'util', 'events',
-    'buffer', 'assert', 'child_process', 'zlib', 'net', 'tls', 'module', 'querystring',
-    'string_decoder', 'timers', 'worker_threads', 'node:fs', 'node:path', 'node:url',
-    'node:crypto', 'node:http', 'node:https', 'node:os', 'node:stream', 'node:util',
-  ]);
-
-  // Common packages Nexa may legitimately use in generated React/Next projects.
-  // Keep versions pinned to known-good public releases instead of inventing versions.
-  const knownVersions: Record<string, string> = {
-    '@headlessui/react': '^2.2.10',
-  };
-
-  const missing = new Set<string>();
-  const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\()(['"])([^'"./@][^'"]*|@[^/]+\/[^'"]+)\1/g;
-
+  const deps = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]);
+  const builtin = new Set(['fs', 'path', 'url', 'crypto', 'http', 'https', 'os', 'stream', 'util', 'events', 'buffer', 'assert', 'child_process', 'zlib', 'net', 'tls', 'module', 'querystring', 'string_decoder', 'timers', 'worker_threads']);
+  const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|require\()(['"])([^'"./@][^'"]*|@[^/]+\/[^'"]+)\1/g;
   for (const file of files) {
     importPattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = importPattern.exec(file.content)) !== null) {
       const specifier = match[2];
-      const packageName = specifier.startsWith('@')
-        ? specifier.split('/').slice(0, 2).join('/')
-        : specifier.split('/')[0];
-      if (!builtin.has(packageName) && !declared.has(packageName)) missing.add(packageName);
+      const packageName = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
+      if (!builtin.has(packageName) && !deps.has(packageName)) {
+        throw new ProjectCompletenessError(`Generated file ${file.path} imports ${packageName}, but package.json does not declare it.`);
+      }
     }
   }
-
-  if (!missing.size) return files;
-
-  let missingError: ProjectCompletenessError | null = null;
-  missing.forEach(packageName => {
-    if (missingError) return;
-    const version = knownVersions[packageName];
-    if (!version) {
-      missingError = new ProjectCompletenessError(
-        `Generated file ${files.find(file => file.content.includes(packageName))?.path ?? 'unknown'} imports ${packageName}, but package.json does not declare it.`,
-      );
-      return;
-    }
-    dependencies[packageName] = version;
-    declared.add(packageName);
-  });
-  if (missingError) throw missingError;
-
-  const updatedPackage = { ...pkg, dependencies };
-  const updated = files.map(file =>
-    file.path === 'package.json'
-      ? { ...file, content: JSON.stringify(updatedPackage, null, 2) + '\n' }
-      : file,
-  );
-
-  console.warn('[NEXA DEPENDENCY REPAIR]', Array.from(missing).join(', '));
-  return updated;
 }
 
 export function ensureCompleteNextProject(input: ProjectFile[], options: { requireShell?: boolean } = {}) {
@@ -191,26 +203,35 @@ export function ensureCompleteNextProject(input: ProjectFile[], options: { requi
 
   validateJson(files);
   validateContents(files);
-  const validatedFiles = validatePackage(files);
-  validateLocalImports(validatedFiles);
+  validatePackage(files);
+  validateLocalImports(files);
 
   const requireShell = options.requireShell ?? true;
-  const packageFile = get(validatedFiles, 'package.json');
+  const packageFile = get(files, 'package.json');
   if (requireShell) {
     if (!packageFile) throw new ProjectCompletenessError('Complete Next.js generation requires package.json.');
     let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
     try { pkg = JSON.parse(packageFile.content); } catch { throw new ProjectCompletenessError('package.json is invalid JSON.'); }
     if (!pkg.dependencies?.next && !pkg.devDependencies?.next) throw new ProjectCompletenessError('package.json does not declare Next.js.');
 
-    const hasAppPage = Boolean(get(validatedFiles, 'app/page.tsx') || get(validatedFiles, 'app/page.jsx') || get(validatedFiles, 'app/page.ts') || get(validatedFiles, 'app/page.js'));
-    const hasPagesIndex = Boolean(get(validatedFiles, 'pages/index.tsx') || get(validatedFiles, 'pages/index.jsx') || get(validatedFiles, 'pages/index.ts') || get(validatedFiles, 'pages/index.js'));
-    if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx or pages/index.tsx. Nexa will not create a fake placeholder homepage.');
-    if (hasAppPage && !get(validatedFiles, 'app/layout.tsx') && !get(validatedFiles, 'app/layout.jsx') && !get(validatedFiles, 'app/layout.ts') && !get(validatedFiles, 'app/layout.js')) {
-      throw new ProjectCompletenessError('App Router generation requires app/layout.tsx.');
-    }
+    const hasAppPage = Boolean(
+      get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js') ||
+      get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js')
+    );
+    const hasPagesIndex = Boolean(
+      get(files, 'pages/index.tsx') || get(files, 'pages/index.jsx') || get(files, 'pages/index.ts') || get(files, 'pages/index.js') ||
+      get(files, 'src/pages/index.tsx') || get(files, 'src/pages/index.jsx') || get(files, 'src/pages/index.ts') || get(files, 'src/pages/index.js')
+    );
+    if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx, src/app/page.tsx, pages/index.tsx, or src/pages/index.tsx. Nexa will not create a fake placeholder homepage.');
+    const hasRootAppPage = Boolean(get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js'));
+    const hasSrcAppPage = Boolean(get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js'));
+    const hasRootLayout = Boolean(get(files, 'app/layout.tsx') || get(files, 'app/layout.jsx') || get(files, 'app/layout.ts') || get(files, 'app/layout.js'));
+    const hasSrcLayout = Boolean(get(files, 'src/app/layout.tsx') || get(files, 'src/app/layout.jsx') || get(files, 'src/app/layout.ts') || get(files, 'src/app/layout.js'));
+    if (hasRootAppPage && !hasRootLayout) throw new ProjectCompletenessError('App Router generation requires app/layout.tsx.');
+    if (hasSrcAppPage && !hasSrcLayout) throw new ProjectCompletenessError('App Router generation requires src/app/layout.tsx.');
   }
 
-  return validatedFiles;
+  return files;
 }
 
 export function serializeFileBlocks(files: ProjectFile[]) {
