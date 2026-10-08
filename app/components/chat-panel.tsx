@@ -106,9 +106,26 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     setGenerating(true); setError('');
     try {
       const response = await fetch('/api/generate-proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId, history }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Nexa could not generate a proposal.');
-      const summary = `Proposal ready: ${data.changesCount} ${data.changesCount === 1 ? 'file' : 'files'} to modify.`;
+      const raw = await response.text();
+      let data: { proposalId?: string; changesCount?: number; error?: string; message?: string } = {};
+
+      if (raw.trim()) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          const detail = raw.replace(/\s+/g, ' ').trim();
+          throw new Error(detail || `Generate Proposal returned an invalid response (HTTP ${response.status}).`);
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || data.message || `Generate Proposal failed (HTTP ${response.status}).`);
+      }
+      if (!data.proposalId) {
+        throw new Error('Generate Proposal returned an incomplete response. Please try again.');
+      }
+
+      const summary = `Proposal ready: ${data.changesCount ?? 0} ${(data.changesCount ?? 0) === 1 ? 'file' : 'files'} to modify.`;
       setMessages(prev => [...prev, { role: 'assistant', content: summary, created_at: new Date().toISOString() }]);
       setProposalId(data.proposalId); setChangesCount(data.changesCount ?? 0); setProposalReady(false);
       onProposalGenerated?.(data.proposalId);

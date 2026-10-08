@@ -125,10 +125,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
   }
 
-  const files = ensureCompleteNextProject(parseFiles(generated));
+  let files: { path: string; content: string }[];
+  try {
+    files = ensureCompleteNextProject(parseFiles(generated));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Generated project failed completeness validation.';
+    console.error('[NEXA PROPOSAL VALIDATION ERROR]', message);
+    return NextResponse.json({ error: message }, { status: 422 });
+  }
+
   generated = serializeFileBlocks(files);
-  if (!files.length) console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
-  if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
+  console.log('[NEXA PROPOSAL RESPONSE]', JSON.stringify({ projectId, provider, files: files.length, generatedLength: generated.length }));
+  if (!files.length) {
+    console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
+    return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
+  }
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
   const { data: proposal, error: proposalError } = await supabase
