@@ -78,16 +78,7 @@ async function* readSSE(body: ReadableStream<Uint8Array>, onActivity?: () => voi
   }
 }
 
-function isTruncationReason(reason: unknown): boolean {
-  return typeof reason === 'string' && /^(length|max_tokens|max_output_tokens|token_limit)$/i.test(reason);
-}
-
-/**
- * Each provider attempt is buffered completely before anything is exposed to the
- * caller. If the provider stops because it hit its output limit, the partial
- * response is discarded and failover continues with a clean attempt.
- */
-async function callProvider(attempt: Attempt): Promise<string> {
+async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
   const controller = new AbortController();
   let timeout = setTimeout(() => controller.abort(), 8_000);
   const resetTimeout = () => {
@@ -116,8 +107,7 @@ async function callProvider(attempt: Attempt): Promise<string> {
       );
       await assertOk(response, attempt.provider);
       if (!response.body) throw new ProviderError(attempt.provider, 500, 'Streaming response was empty.');
-
-      let output = '';
+      let finishReason = '';
       for await (const payload of readSSE(response.body, resetTimeout)) {
         if (payload === '[DONE]') continue;
         try {
@@ -125,25 +115,17 @@ async function callProvider(attempt: Attempt): Promise<string> {
           const candidates = (json as { candidates?: unknown })?.candidates;
           if (!Array.isArray(candidates)) continue;
           const candidate = candidates[0] as { content?: unknown; finishReason?: unknown };
-          const finishReason = candidate?.finishReason;
-          if (isTruncationReason(finishReason)) {
-            throw new ProviderError(attempt.provider, 499, `Provider stopped at its output limit (${String(finishReason)}).`);
-          }
-          const content = candidate?.content;
+          if (typeof candidate.finishReason === 'string') finishReason = candidate.finishReason;
+          const content = candidate.content;
           const parts = (content as { parts?: unknown })?.parts;
           if (!Array.isArray(parts)) continue;
-          for (const part of parts) {
-            const text = part && typeof (part as { text?: unknown }).text === 'string'
-              ? (part as { text: string }).text
-              : '';
-            if (text) output += text;
-          }
-        } catch (error) {
-          if (error instanceof ProviderError) throw error;
-          // Ignore malformed provider events.
-        }
+          for (const part of parts) if (part && typeof (part as { text?: unknown }).text === 'string') yield (part as { text: string }).text;
+        } catch { /* Ignore malformed provider events. */ }
       }
-      return output;
+      if (/length|max_tokens|max_output_tokens|token_limit/i.test(finishReason)) {
+        throw new ProviderError(attempt.provider, 499, `Provider output was truncated (${finishReason}).`);
+      }
+      return;
     }
 
     const url = attempt.provider === 'groq'
@@ -169,8 +151,7 @@ async function callProvider(attempt: Attempt): Promise<string> {
     });
     await assertOk(response, attempt.provider);
     if (!response.body) throw new ProviderError(attempt.provider, 500, 'Streaming response was empty.');
-
-    let output = '';
+    let finishReason = '';
     for await (const payload of readSSE(response.body, resetTimeout)) {
       if (payload === '[DONE]') continue;
       try {
@@ -178,18 +159,15 @@ async function callProvider(attempt: Attempt): Promise<string> {
         const choices = (json as { choices?: unknown })?.choices;
         if (!Array.isArray(choices)) continue;
         const choice = choices[0] as { delta?: unknown; finish_reason?: unknown };
-        if (isTruncationReason(choice?.finish_reason)) {
-          throw new ProviderError(attempt.provider, 499, `Provider stopped at its output limit (${String(choice.finish_reason)}).`);
-        }
-        const delta = choice?.delta;
+        if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason;
+        const delta = choice.delta;
         const content = (delta as { content?: unknown })?.content;
-        if (typeof content === 'string' && content) output += content;
-      } catch (error) {
-        if (error instanceof ProviderError) throw error;
-        // Ignore malformed provider events.
-      }
+        if (typeof content === 'string' && content) yield content;
+      } catch { /* Ignore malformed provider events. */ }
     }
-    return output;
+    if (/length|max_tokens|max_output_tokens|token_limit/i.test(finishReason)) {
+      throw new ProviderError(attempt.provider, 499, `Provider output was truncated (${finishReason}).`);
+    }
   } finally {
     clearTimeout(timeout);
   }
@@ -218,7 +196,6 @@ export function createStreamingFailover({
   const order: Provider[] = isChat
     ? ['groq', 'gemini', 'openrouter']
     : ['gemini', 'groq', 'openrouter'];
-  const limit = outputTokens ?? (isChat ? 3072 : 16384);
 
   return new ReadableStream<string>({
     async start(controller) {
@@ -239,12 +216,13 @@ export function createStreamingFailover({
           providerTried.keysTried += 1;
           for (const model of models) {
             providerTried.modelsTried.push(model);
-            const attempt: Attempt = { provider, key, model, messages, systemPrompt, outputTokens: limit };
+            const attempt: Attempt = { provider, key, model, messages, systemPrompt, outputTokens: outputTokens ?? (isChat ? 3072 : 16384) };
             try {
               console.log(`[STREAM TRY] ${provider} ${model} key=${key.id.slice(0, 6)}`);
-              const output = await callProvider(attempt);
-              if (!output.trim()) throw new ProviderError(provider, 502, 'Provider returned an empty response.');
-              controller.enqueue(output);
+              const buffered: string[] = [];
+              const providerStream = callProviderStream(attempt);
+              for await (const chunk of providerStream) buffered.push(chunk);
+              for (const chunk of buffered) controller.enqueue(chunk);
               controller.close();
               console.log(`[STREAM SUCCESS] ${provider} ${model}`);
               return;
@@ -255,6 +233,8 @@ export function createStreamingFailover({
               if (isCooldownError(error)) {
                 startCooldown(provider);
                 controller.enqueue(`${SWITCH_PREFIX}${provider}`);
+                // A provider-level quota/network failure should immediately move
+                // to the next provider instead of burning through every key/model.
                 break;
               }
               controller.enqueue(`${SWITCH_PREFIX}${provider}`);
@@ -278,7 +258,6 @@ export async function streamWithFailover({
   keysByProvider,
   onChunk,
   outputTokens,
-  isChat = false,
 }: {
   provider: Provider;
   messages: AIMessage[];
@@ -286,17 +265,10 @@ export async function streamWithFailover({
   keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
   outputTokens?: number;
-  isChat?: boolean;
 }): Promise<void> {
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = keys.slice(0, 3).map((value, index) => ({ id: `${provider}-${index + 1}`, value }));
-  const stream = createStreamingFailover({
-    requestedProvider: provider,
-    keysByProvider: allKeys,
-    messages,
-    isChat,
-    outputTokens,
-  });
+  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, outputTokens });
   const reader = stream.getReader();
   try {
     while (true) {
