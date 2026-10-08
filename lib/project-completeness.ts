@@ -28,7 +28,9 @@ function dedupeLast(files: ProjectFile[]) {
     if (!isPathSafe(path)) continue;
     byPath.set(path, { path, content: file.content });
   }
-  return [...byPath.values()];
+  const result: ProjectFile[] = [];
+  byPath.forEach(file => result.push(file));
+  return result;
 }
 
 function get(files: ProjectFile[], path: string) {
