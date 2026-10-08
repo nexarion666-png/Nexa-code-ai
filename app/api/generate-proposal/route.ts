@@ -104,7 +104,7 @@ export async function POST(request: Request) {
     await streamWithFailover({
       provider,
       messages,
-      keys: failoverKeysByProvider[provider],
+      keys: failoverKeysByProvider[provider].map(key => key.value),
       keysByProvider: failoverKeysByProvider,
       mode: 'generation',
       onChunk: async chunk => { generated += chunk; },
