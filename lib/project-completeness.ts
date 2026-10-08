@@ -17,10 +17,6 @@ const DEFAULT_PACKAGE = {
   },
 };
 
-function has(files: ProjectFile[], path: string) {
-  return files.some(file => file.path === path);
-}
-
 function get(files: ProjectFile[], path: string) {
   return files.find(file => file.path === path);
 }
@@ -51,7 +47,7 @@ function packageContent(files: ProjectFile[]) {
     try {
       pkg = JSON.parse(packageFile.content);
     } catch {
-      pkg = { ...DEFAULT_PACKAGE, dependencies: { ...DEFAULT_PACKAGE.dependencies }, devDependencies: { ...DEFAULT_PACKAGE.devDependencies } };
+      throw new Error('Generated package.json is not valid JSON.');
     }
   }
   pkg.name = typeof pkg.name === 'string' && pkg.name.trim() ? pkg.name : 'nexa-generated-app';
@@ -63,21 +59,89 @@ function packageContent(files: ProjectFile[]) {
   return JSON.stringify(pkg, null, 2) + '\n';
 }
 
-function defaultPage(files: ProjectFile[]) {
-  const existing = get(files, 'app/page.tsx') || get(files, 'pages/index.tsx');
-  if (existing) return existing.content;
-  const title = get(files, 'package.json')?.content.match(/"name"\s*:\s*"([^"]+)"/)?.[1] || 'Nexa App';
-  return `export default function HomePage() {\n  return (\n    <main className="min-h-screen bg-white text-zinc-900">\n      <div className="mx-auto flex min-h-screen max-w-6xl items-center justify-center px-6 py-16">\n        <section className="w-full max-w-3xl">\n          <p className="text-sm font-medium text-zinc-500">Next.js application</p>\n          <h1 className="mt-3 text-4xl font-bold tracking-tight">${title}</h1>\n          <p className="mt-4 text-zinc-600">Your project is ready to build and customize.</p>\n        </section>\n      </div>\n    </main>\n  );\n}\n`;
+function validateSource(file: ProjectFile): string | null {
+  const content = file.content.trim();
+  if (!content) return `${file.path} is empty.`;
+
+  if (/```(?:tsx?|jsx?|json|css|javascript|typescript)?\s*$/.test(content) || /^```/.test(content)) {
+    return `${file.path} still contains an unfinished code fence.`;
+  }
+
+  const pairs: Record<string, string> = { '{': '}', '[': ']', '(': ')' };
+  const stack: string[] = [];
+  let quote: string | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let i = 0; i < content.length; i += 1) {
+    const c = content[i];
+    const n = content[i + 1];
+
+    if (lineComment) {
+      if (c === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (c === '*' && n === '/') {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) { escaped = false; continue; }
+      if (c === '\\') { escaped = true; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '/' && n === '/') { lineComment = true; i += 1; continue; }
+    if (c === '/' && n === '*') { blockComment = true; i += 1; continue; }
+    if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+    if (pairs[c]) stack.push(pairs[c]);
+    else if (c === '}' || c === ']' || c === ')') {
+      if (stack.pop() !== c) return `${file.path} has unbalanced syntax.`;
+    }
+  }
+
+  if (quote || blockComment || stack.length) return `${file.path} appears truncated or has unclosed syntax.`;
+
+  if (file.path === 'package.json') {
+    try { JSON.parse(file.content); } catch { return 'package.json is not valid JSON.'; }
+  }
+  return null;
 }
 
-export function ensureCompleteNextProject(input: ProjectFile[]) {
+function routeFileExists(files: ProjectFile[], route: string) {
+  const clean = route.replace(/^\/+/, '').replace(/\/+$/, '');
+  return [
+    `app/${clean}/page.tsx`,
+    `app/${clean}/page.ts`,
+    `app/${clean}/page.jsx`,
+    `app/${clean}/page.js`,
+    `pages/${clean}.tsx`,
+    `pages/${clean}.jsx`,
+  ].some(path => Boolean(get(files, path)));
+}
+
+function inferRequiredRoutes(requirements: string) {
+  const routes = new Set<string>();
+  const matches = requirements.match(/(?:^|[\s`"'(])\/([a-zA-Z0-9_-]+(?:\/\[[^\]]+\])?)(?=$|[\s`"'.,):])/g) ?? [];
+  for (const raw of matches) {
+    const route = raw.trim().replace(/^[`"'(\s]+/, '').replace(/[.,):`"'\s]+$/, '');
+    if (route && route !== '/api' && !route.includes('http')) routes.add(route);
+  }
+  return [...routes];
+}
+
+export function ensureCompleteNextProject(input: ProjectFile[], requirements = '') {
   const files = input.map(file => ({ path: file.path, content: file.content }));
   if (!looksLikeNextProject(files)) return files;
 
   const packageJson = packageContent(files);
-  upsert(files, 'package.json', packageJson);
   const packageFile = get(files, 'package.json');
   if (packageFile) packageFile.content = packageJson;
+  else upsert(files, 'package.json', packageJson);
 
   upsert(files, 'tsconfig.json', `{
   "compilerOptions": {
@@ -99,18 +163,69 @@ export function ensureCompleteNextProject(input: ProjectFile[]) {
   },
   "include": ["next-env.d.ts", ".next/types/**/*.ts", "**/*.ts", "**/*.tsx"],
   "exclude": ["node_modules"]
-}\n`);
-  upsert(files, 'next-env.d.ts', `/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n\n// NOTE: This file should not be edited\n// see https://nextjs.org/docs/basic-features/typescript for more information.\n`);
-  upsert(files, 'next.config.js', `/** @type {import('next').NextConfig} */\nconst nextConfig = {\n  reactStrictMode: true,\n};\n\nmodule.exports = nextConfig;\n`);
-  upsert(files, 'postcss.config.js', `module.exports = {\n  plugins: {\n    tailwindcss: {},\n    autoprefixer: {},\n  },\n};\n`);
-  upsert(files, 'tailwind.config.ts', `import type { Config } from 'tailwindcss';\n\nconst config: Config = {\n  content: [\n    './app/**/*.{js,ts,jsx,tsx,mdx}',\n    './components/**/*.{js,ts,jsx,tsx,mdx}',\n    './context/**/*.{js,ts,jsx,tsx,mdx}',\n    './lib/**/*.{js,ts,jsx,tsx,mdx}',\n  ],\n  theme: { extend: {} },\n  plugins: [],\n};\n\nexport default config;\n`);
-  upsert(files, 'app/globals.css', `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  color-scheme: light;\n}\n\nhtml, body {\n  min-height: 100%;\n}\n\nbody {\n  margin: 0;\n}\n`);
-  upsert(files, 'app/layout.tsx', `import './globals.css';\n\nexport const metadata = {\n  title: 'Nexa App',\n  description: 'Generated with Nexa Code AI',\n};\n\nexport default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {\n  return (\n    <html lang="en">\n      <body>{children}</body>\n    </html>\n  );\n}\n`);
-  upsert(files, 'app/page.tsx', defaultPage(files));
+}
+`);
+  upsert(files, 'next-env.d.ts', `/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+`);
+  upsert(files, 'next.config.js', `/** @type {import('next').NextConfig} */
+const nextConfig = { reactStrictMode: true };
+module.exports = nextConfig;
+`);
+  upsert(files, 'postcss.config.js', `module.exports = {
+  plugins: { tailwindcss: {}, autoprefixer: {} },
+};
+`);
+  upsert(files, 'tailwind.config.ts', `import type { Config } from 'tailwindcss';
+
+const config: Config = {
+  content: [
+    './app/**/*.{js,ts,jsx,tsx,mdx}',
+    './components/**/*.{js,ts,jsx,tsx,mdx}',
+    './context/**/*.{js,ts,jsx,tsx,mdx}',
+    './lib/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
+  theme: { extend: {} },
+  plugins: [],
+};
+export default config;
+`);
+  upsert(files, 'app/globals.css', `@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+html, body { min-height: 100%; }
+body { margin: 0; }
+`);
+  upsert(files, 'app/layout.tsx', `import './globals.css';
+
+export const metadata = {
+  title: 'Nexa App',
+  description: 'Generated with Nexa Code AI',
+};
+
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return <html lang="en"><body>{children}</body></html>;
+}
+`);
+
+  const hasHome = ['app/page.tsx', 'app/page.jsx', 'app/page.js', 'pages/index.tsx', 'pages/index.jsx'].some(path => Boolean(get(files, path)));
+  if (!hasHome) throw new Error('Generated project is missing the required homepage (app/page.tsx or pages/index). Nexa will not create a fake placeholder page.');
+
+  const errors = files.map(validateSource).filter((error): error is string => Boolean(error));
+  if (errors.length) throw new Error(`Generated project validation failed: ${errors.slice(0, 8).join(' ')}`);
+
+  const requiredRoutes = inferRequiredRoutes(requirements);
+  const missingRoutes = requiredRoutes.filter(route => !routeFileExists(files, route));
+  if (missingRoutes.length) {
+    throw new Error(`Generated project is incomplete. Missing requested route page(s): ${missingRoutes.join(', ')}. Regenerate instead of saving a partial proposal.`);
+  }
 
   return files;
 }
 
 export function serializeFileBlocks(files: ProjectFile[]) {
-  return files.map(file => `---FILE: ${file.path}---\n${file.content.replace(/\s+$/, '\n')}`).join('\n');
+  return files.map(file => `---FILE: ${file.path}---
+${file.content.replace(/\s+$/, '\n')}`).join('\n');
 }

@@ -8,21 +8,29 @@ import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-co
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-const SYSTEM = `You are Nexa, senior full-stack dev. Based on conversation, output detailed plan, then output files EXACTLY like:
+const SYSTEM = `You are Nexa, senior full-stack developer. Generate the COMPLETE project requested in the conversation.
+Output ONLY file blocks, with every required file and the FULL file content:
 ---FILE: app/page.tsx---
 full file content here
 ---FILE: lib/utils.ts---
-content
-List ALL files needed for feature. Production-ready Next.js 14 Tailwind code. No explanation outside file blocks.`;
+full file content here
+Rules:
+- Do not ask questions.
+- Do not stop after scaffolding/config files.
+- List ALL pages, routes, components, context/state, data, types, styles, and configuration files required by the user's request.
+- Every local import must point to a generated file.
+- Every explicitly requested route must have its page file.
+- Never output a placeholder homepage in place of requested functionality.
+- If the response would be too long, prioritize completing all requested functionality and continue until every required file block is emitted.
+- No explanation outside file blocks.`;
 
 const FILE_PATTERN = /---\s*FILE:\s*(.+?)\s*---\s*([\s\S]*?)(?=---\s*FILE:|$)/g;
 
 const GENERATE_NOW = 'The requirements are settled. Do not ask questions and do not write any text outside file blocks. Output the complete set of files now, each starting with a line exactly like ---FILE: path/to/file.tsx--- followed by the full file content.';
 
 function parseFiles(content: string) {
-  const files: { path: string; content: string }[] = [];
+  const byPath = new Map<string, { path: string; content: string }>();
   FILE_PATTERN.lastIndex = 0;
-  const seen = new Set<string>();
   let match: RegExpExecArray | null;
   while ((match = FILE_PATTERN.exec(content)) !== null) {
     const path = match[1].trim().replace(/^['"]|['"]$/g, '').replace(/^\/+/, '');
@@ -31,11 +39,12 @@ function parseFiles(content: string) {
       .replace(/\r?\n?```\s*$/, '')
       .replace(/^\n/, '')
       .replace(/\s+$/, '\n');
-    if (!path || path.includes('..') || path.includes('\\') || seen.has(path)) continue;
-    seen.add(path);
-    files.push({ path, content: fileContent });
+    if (!path || path.includes('..') || path.includes('\\')) continue;
+    // Last complete block wins. This prevents an earlier truncated duplicate
+    // from masking a later regenerated copy of the same file.
+    byPath.set(path, { path, content: fileContent });
   }
-  return files;
+  return Array.from(byPath.values());
 }
 
 export async function POST(request: Request) {
@@ -104,6 +113,8 @@ export async function POST(request: Request) {
       messages,
       keys: keysByProvider[provider],
       keysByProvider: failoverKeysByProvider,
+      outputTokens: 16384,
+      isChat: false,
       onChunk: async chunk => { generated += chunk; },
     });
   } catch (error) {
@@ -122,10 +133,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
   }
 
-  const files = ensureCompleteNextProject(parseFiles(generated));
+  let files: ReturnType<typeof parseFiles>;
+  try {
+    files = ensureCompleteNextProject(parseFiles(generated), safeHistory.map(item => item.content).join('\n'));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Generated project failed completeness validation.';
+    console.error('[NEXA PROPOSAL INCOMPLETE]', message);
+    return NextResponse.json({
+      error: 'Nexa stopped before producing a complete project. Please regenerate the proposal.',
+      details: message,
+    }, { status: 422 });
+  }
   generated = serializeFileBlocks(files);
   if (!files.length) console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
-  if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
+  if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Regenerate the proposal.' }, { status: 422 });
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
   const { data: proposal, error: proposalError } = await supabase
