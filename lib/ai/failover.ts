@@ -8,9 +8,7 @@ export const MODELS: Record<Provider, readonly string[]> = {
 };
 
 const CHAT_OUTPUT_TOKENS = 4096;
-const GENERATION_OUTPUT_TOKENS = 8192;
-const OPENROUTER_GENERATION_OUTPUT_TOKENS = 4096;
-const REPAIR_OUTPUT_TOKENS = 4096;
+const GENERATION_OUTPUT_TOKENS = 32768;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
 const MAX_CONTINUATIONS = 3;
@@ -33,6 +31,14 @@ type Attempt = {
 };
 
 const cooldownUntil: Record<string, number> = {};
+
+function cooldownKey(provider: Provider, key: FailoverKey): string {
+  return `${provider}:${key.id}`;
+}
+
+function isCoolingDown(provider: Provider, key: FailoverKey): boolean {
+  return (cooldownUntil[cooldownKey(provider, key)] ?? 0) > Date.now();
+}
 const SWITCH_PREFIX = '__NEXA_PROVIDER_SWITCH__:';
 
 export type CooldownStatus = Record<Provider, { cooldownUntil: number; cooldownSeconds: number }>;
@@ -46,8 +52,13 @@ export function getCooldownStatus(): CooldownStatus {
   };
 }
 
-function startCooldown(provider: Provider, seconds = 60) {
-  cooldownUntil[provider] = Date.now() + seconds * 1000;
+function startCooldown(provider: Provider, seconds = 60, key?: FailoverKey) {
+  const until = Date.now() + seconds * 1000;
+  if (key) {
+    cooldownUntil[cooldownKey(provider, key)] = until;
+    return;
+  }
+  cooldownUntil[provider] = until;
 }
 
 function modelsFor(provider: Provider): readonly string[] {
@@ -89,9 +100,9 @@ function isTruncationReason(value: unknown): boolean {
   return typeof value === 'string' && /^(length|max_tokens|max_tokens_exceeded|MAX_TOKENS)$/i.test(value);
 }
 
-async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' | 'repair' = 'chat'): AsyncGenerator<string> {
+async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' = 'chat'): AsyncGenerator<string> {
   const controller = new AbortController();
-  const timeoutMs = mode === 'generation' || mode === 'repair' ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
+  const timeoutMs = mode === 'generation' ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
   let timeout = setTimeout(() => controller.abort(), timeoutMs);
   const resetTimeout = () => {
     clearTimeout(timeout);
@@ -156,9 +167,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
-    const outputTokens = mode === 'generation'
-      ? (attempt.provider === 'openrouter' ? OPENROUTER_GENERATION_OUTPUT_TOKENS : GENERATION_OUTPUT_TOKENS)
-      : mode === 'repair' ? REPAIR_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
+    const outputTokens = mode === 'generation' ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
     const response = await fetch(url, {
       method: 'POST',
       headers,
@@ -206,26 +215,20 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
 }
 
 function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === 429 || error.status === 402 || error.status === 408 || /quota|rate.?limit|too many requests|temporarily unavailable|high demand|in.?flight.*budget|available credits|add credits/i.test(error.message);
+  if (error instanceof ProviderError) return error.status === 429 || error.status === 408 || error.status === 402 || /quota|rate.?limit|too many requests|temporarily unavailable|high demand|in[_ -]?flight[_ -]?budget|available credits/i.test(error.message);
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
 }
 
 function isDeadKeyError(error: unknown): boolean {
   if (!(error instanceof ProviderError)) return false;
-  return error.status === 401 || error.status === 403 || error.status === 429 || /quota|rate.?limit|invalid api key|unauthorized/i.test(error.message);
-}
-
-function cooldownSecondsFor(error: unknown): number {
-  if (error instanceof ProviderError && error.status === 402 && /in.?flight.*budget|available credits/i.test(error.message)) return 120;
-  if (error instanceof ProviderError && error.status === 408) return 20;
-  return 60;
+  return error.status === 401 || error.status === 403 || /invalid api key|unauthorized/i.test(error.message);
 }
 
 function isModelError(error: unknown): boolean {
   return error instanceof ProviderError && error.status === 404;
 }
 
-async function collectAttempt(attempt: Attempt, mode: 'chat' | 'generation' | 'repair'): Promise<string> {
+async function collectAttempt(attempt: Attempt, mode: 'chat' | 'generation'): Promise<string> {
   let output = '';
   for await (const chunk of callProviderStream(attempt, mode)) output += chunk;
   return output;
@@ -291,6 +294,10 @@ export function createStreamingFailover({
         if (!keys.length) continue;
 
         for (const key of keys) {
+          if (isCoolingDown(provider, key)) {
+            providerTried.lastError = `Key ${key.id.slice(0, 6)} cooldown active`;
+            continue;
+          }
           providerTried.keysTried += 1;
           for (const model of models) {
             providerTried.modelsTried.push(model);
@@ -308,7 +315,8 @@ export function createStreamingFailover({
               console.error(`[STREAM FAIL] ${provider} ${model}: ${lastErr}`);
               controller.enqueue(`${SWITCH_PREFIX}${provider}`);
               if (isCooldownError(error)) {
-                startCooldown(provider, cooldownSecondsFor(error));
+                const seconds = error instanceof ProviderError && error.status === 408 ? 20 : error instanceof ProviderError && error.status === 402 ? 120 : 60;
+                startCooldown(provider, seconds, key);
                 break;
               }
               if (isDeadKeyError(error)) break;
@@ -316,7 +324,6 @@ export function createStreamingFailover({
               if (error instanceof ProviderError && error.code === 'TRUNCATED_OUTPUT') continue;
             }
           }
-          if ((cooldownUntil[provider] ?? 0) > Date.now()) break;
         }
         tried.push(providerTried);
       }
@@ -340,7 +347,7 @@ export async function streamWithFailover({
   keys: string[] | FailoverKey[];
   keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
-  mode?: 'chat' | 'generation' | 'repair';
+  mode?: 'chat' | 'generation';
 }): Promise<void> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
@@ -353,21 +360,16 @@ export async function streamWithFailover({
 
   for (const currentProvider of orderedProviders) {
     const providerKeys = allKeys[currentProvider] ?? [];
-    // Groq's on-demand TPM can reject large generation prompts before any output
-    // is produced. Skip it rather than wasting a failover attempt when the input
-    // alone is already above the practical ~8k-token budget.
-    if (mode === 'generation' && currentProvider === 'groq') {
-      const promptChars = messages.reduce((total, message) => total + message.content.length, 0);
-      if (promptChars > 30000) {
-        tried.push({ provider: currentProvider, keysTried: 0, modelsTried: [], lastError: 'Generation prompt is too large for Groq on-demand TPM; skipped.' });
-        continue;
-      }
-    }
-    if (!providerKeys.length || (cooldownUntil[currentProvider] ?? 0) > Date.now()) continue;
+    if (!providerKeys.length) continue;
+    if ((cooldownUntil[currentProvider] ?? 0) > Date.now()) continue;
     const models = modelsFor(currentProvider);
     const info = { provider: currentProvider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
 
     for (const key of providerKeys) {
+      if (isCoolingDown(currentProvider, key)) {
+        info.lastError = `Key ${key.id.slice(0, 6)} cooldown active`;
+        continue;
+      }
       info.keysTried += 1;
       for (const model of models) {
         info.modelsTried.push(model);
@@ -379,10 +381,6 @@ export async function streamWithFailover({
             output = await collectAttempt(attempt, mode);
           } catch (error) {
             if (!(error instanceof ProviderError) || error.code !== 'TRUNCATED_OUTPUT' || !error.partialOutput || mode !== 'generation') throw error;
-            if (currentProvider === 'openrouter') {
-              console.warn(`[STREAM TRUNCATED] ${currentProvider} ${model} at ${error.partialOutput.length} chars; switching model instead of issuing an immediate continuation request.`);
-              throw error;
-            }
             console.warn(`[STREAM CONTINUE] ${currentProvider} ${model} truncated at ${error.partialOutput.length} chars; continuing.`);
             output = await continueGeneration(attempt, error.partialOutput);
           }
@@ -395,13 +393,13 @@ export async function streamWithFailover({
           info.lastError = lastError;
           console.error(`[STREAM FAIL] ${currentProvider} ${model}: ${lastError}`);
           if (isCooldownError(error)) {
-            startCooldown(currentProvider, cooldownSecondsFor(error));
+            const seconds = error instanceof ProviderError && error.status === 408 ? 20 : error instanceof ProviderError && error.status === 402 ? 120 : 60;
+            startCooldown(currentProvider, seconds, key);
             break;
           }
           if (isDeadKeyError(error)) break;
         }
       }
-      if ((cooldownUntil[currentProvider] ?? 0) > Date.now()) break;
     }
     tried.push(info);
   }
@@ -427,7 +425,7 @@ export function parseFailoverError(message: string): {
 }
 
 export function friendlyFailoverError(messageOrProvider: string | Provider): string {
-  if (messageOrProvider.startsWith('KEYS_EXHAUSTED::')) return 'Your configured AI keys are exhausted or rate-limited. Add another key or wait for provider cooldown.';
+  if (messageOrProvider.startsWith('KEYS_EXHAUSTED::')) return 'Your configured AI keys are exhausted or rate-limited. Nexa tried each available key in order before moving to the next provider. Add another key or wait for provider cooldown.';
   if (messageOrProvider.startsWith('AI_UNAVAILABLE::')) return 'Nexa could not complete the request with the currently available AI providers. Try again shortly.';
   return `Nexa couldn't connect with any available ${messageOrProvider} provider. Check the saved keys and provider status, then try again.`;
 }
