@@ -47,7 +47,7 @@ function looksLikeNextProject(files: ProjectFile[]) {
       return true;
     }
   }
-  return files.some(file => /^(?:src\/)?app\/(layout|page)\.(tsx?|jsx?)$/.test(file.path) || /^(?:src\/)?pages\/(index|_app)\.(tsx?|jsx?)$/.test(file.path));
+  return files.some(file => /^app\/(layout|page)\.(tsx?|jsx?)$/.test(file.path) || /^pages\/(index|_app)\.(tsx?|jsx?)$/.test(file.path));
 }
 
 function validateJson(files: ProjectFile[]) {
@@ -80,84 +80,46 @@ function validateContents(files: ProjectFile[]) {
   }
 }
 
-function readPathAliases(files: ProjectFile[]) {
-  const aliases: Array<{ pattern: string; targets: string[] }> = [];
-  const tsconfig = get(files, 'tsconfig.json');
-  if (!tsconfig) return aliases;
-
+function getTsconfigPaths(files: ProjectFile[]) {
+  const file = get(files, 'tsconfig.json');
+  if (!file) return [{ alias: '@/', roots: [''] }];
   try {
-    const config = JSON.parse(tsconfig.content) as {
-      compilerOptions?: {
-        baseUrl?: string;
-        paths?: Record<string, string[]>;
-      };
+    const config = JSON.parse(file.content) as {
+      compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> };
     };
     const baseUrl = config.compilerOptions?.baseUrl ?? '.';
-    const paths = config.compilerOptions?.paths ?? {};
+    const paths = config.compilerOptions?.paths ?? { '@/*': ['./*'] };
+    const aliases: { alias: string; roots: string[] }[] = [];
     Object.entries(paths).forEach(([pattern, targets]) => {
-      if (!Array.isArray(targets)) return;
-      aliases.push({
-        pattern,
-        targets: targets.map(target => normalizePath(`${baseUrl}/${target}`)),
-      });
+      if (!pattern.endsWith('/*') || !Array.isArray(targets)) return;
+      const alias = pattern.slice(0, -1);
+      const wildcardTargets = targets.map(target => target.endsWith('/*') ? target.slice(0, -1) : target);
+      aliases.push({ alias, roots: wildcardTargets.map(target => normalizePath(`${baseUrl}/${target}`)) });
     });
+    return aliases.length ? aliases : [{ alias: '@/', roots: [normalizePath(baseUrl)] }];
   } catch {
-    // Invalid tsconfig is reported by validateJson before this resolver is used.
+    return [{ alias: '@/', roots: [''] }];
   }
-
-  return aliases;
 }
 
-function aliasMatches(pattern: string, specifier: string) {
-  if (pattern.endsWith('/*')) return specifier.startsWith(pattern.slice(0, -1));
-  return specifier === pattern;
-}
-
-function replaceAlias(pattern: string, target: string, specifier: string) {
-  if (pattern.endsWith('/*')) {
-    const prefix = pattern.slice(0, -1);
-    return target.endsWith('*')
-      ? `${target.slice(0, -1)}${specifier.slice(prefix.length)}`
-      : target;
-  }
-  return target;
-}
-
-function resolveCandidates(base: string) {
-  return [
-    base,
-    `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}.mjs`, `${base}.cjs`,
-    `${base}.css`, `${base}.json`,
-    `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`, `${base}/index.jsx`,
-  ];
-}
-
-function resolveLocalImport(fromPath: string, specifier: string, files: Set<string>, aliases: Array<{ pattern: string; targets: string[] }>) {
-  const bases: string[] = [];
-
-  if (specifier.startsWith('@/')) {
-    aliases.forEach(alias => {
-      if (!aliasMatches(alias.pattern, specifier)) return;
-      alias.targets.forEach(target => bases.push(replaceAlias(alias.pattern, target, specifier)));
-    });
-    // Support the common Nexa src-layout even when a generated tsconfig omitted
-    // the alias entry. The generated project's own tsconfig remains authoritative
-    // for the actual build; this fallback prevents a false validation failure when
-    // the files themselves clearly use the standard src/ structure.
-    if (!bases.length && files.has('src/app/layout.tsx')) bases.push(`src/${specifier.slice(2)}`);
-    if (!bases.length) bases.push(specifier.slice(2));
+function resolveLocalImport(fromPath: string, specifier: string, files: Set<string>, aliases: { alias: string; roots: string[] }[]) {
+  let baseCandidates: string[] = [];
+  const alias = aliases.find(item => specifier.startsWith(item.alias));
+  if (alias) {
+    const suffix = specifier.slice(alias.alias.length);
+    baseCandidates = alias.roots.map(root => normalizePath(`${root}/${suffix}`));
   } else if (specifier.startsWith('./') || specifier.startsWith('../')) {
-    bases.push(normalizePath(`${fromPath.split('/').slice(0, -1).join('/')}/${specifier}`));
+    baseCandidates = [normalizePath(`${fromPath.split('/').slice(0, -1).join('/')}/${specifier}`)];
   } else {
     return true;
   }
-
-  return bases.some(base => resolveCandidates(base).some(candidate => files.has(normalizePath(candidate))));
+  const suffixes = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.css', '.json', '/index.ts', '/index.tsx', '/index.js', '/index.jsx'];
+  return baseCandidates.some(base => suffixes.some(suffix => files.has(normalizePath(`${base}${suffix}`))));
 }
 
 function validateLocalImports(files: ProjectFile[]) {
   const paths = new Set(files.map(file => file.path));
-  const aliases = readPathAliases(files);
+  const aliases = getTsconfigPaths(files);
   const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\()(['"])([^'"]+)\1/g;
   for (const file of files) {
     importPattern.lastIndex = 0;
@@ -222,13 +184,15 @@ export function ensureCompleteNextProject(input: ProjectFile[], options: { requi
       get(files, 'pages/index.tsx') || get(files, 'pages/index.jsx') || get(files, 'pages/index.ts') || get(files, 'pages/index.js') ||
       get(files, 'src/pages/index.tsx') || get(files, 'src/pages/index.jsx') || get(files, 'src/pages/index.ts') || get(files, 'src/pages/index.js')
     );
-    if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx, src/app/page.tsx, pages/index.tsx, or src/pages/index.tsx. Nexa will not create a fake placeholder homepage.');
-    const hasRootAppPage = Boolean(get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js'));
-    const hasSrcAppPage = Boolean(get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js'));
-    const hasRootLayout = Boolean(get(files, 'app/layout.tsx') || get(files, 'app/layout.jsx') || get(files, 'app/layout.ts') || get(files, 'app/layout.js'));
-    const hasSrcLayout = Boolean(get(files, 'src/app/layout.tsx') || get(files, 'src/app/layout.jsx') || get(files, 'src/app/layout.ts') || get(files, 'src/app/layout.js'));
-    if (hasRootAppPage && !hasRootLayout) throw new ProjectCompletenessError('App Router generation requires app/layout.tsx.');
-    if (hasSrcAppPage && !hasSrcLayout) throw new ProjectCompletenessError('App Router generation requires src/app/layout.tsx.');
+    if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx or pages/index.tsx. Nexa will not create a fake placeholder homepage.');
+    const hasAppRouterPage = Boolean(get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js') || get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js'));
+    const hasLayout = Boolean(
+      get(files, 'app/layout.tsx') || get(files, 'app/layout.jsx') || get(files, 'app/layout.ts') || get(files, 'app/layout.js') ||
+      get(files, 'src/app/layout.tsx') || get(files, 'src/app/layout.jsx') || get(files, 'src/app/layout.ts') || get(files, 'src/app/layout.js')
+    );
+    if (hasAppRouterPage && !hasLayout) {
+      throw new ProjectCompletenessError('App Router generation requires app/layout.tsx or src/app/layout.tsx.');
+    }
   }
 
   return files;

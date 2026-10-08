@@ -40,6 +40,41 @@ function parseFiles(content: string) {
   return files;
 }
 
+
+async function repairGeneratedProject({
+  provider,
+  keysByProvider,
+  originalMessages,
+  currentFiles,
+  validationError,
+}: {
+  provider: Provider;
+  keysByProvider: Record<Provider, FailoverKey[]>;
+  originalMessages: AIMessage[];
+  currentFiles: { path: string; content: string }[];
+  validationError: string;
+}) {
+  const existingPaths = currentFiles.map(file => file.path).join('\n');
+  const repairPrompt: AIMessage = {
+    role: 'user',
+    content: `The generated Next.js project failed validation. Repair ONLY the missing or invalid project files required to make the project complete. Do NOT replace valid files and do NOT create placeholders.\n\nValidation error:\n${validationError}\n\nFiles already generated:\n${existingPaths || '(none)'}\n\nCRITICAL: If the project uses a src/ directory, use src/app/page.tsx and src/app/layout.tsx. If it uses a root app/ directory, use app/page.tsx and app/layout.tsx. Resolve imports according to tsconfig.json. Generate every missing file needed to satisfy the validation error. Output ONLY FILE blocks in this exact format:\n---FILE: path/to/file.tsx---\nfull file content`,
+  };
+  const repairMessages: AIMessage[] = [
+    ...originalMessages,
+    repairPrompt,
+  ];
+  let repaired = '';
+  await streamWithFailover({
+    provider,
+    messages: repairMessages,
+    keys: keysByProvider[provider] ?? [],
+    keysByProvider,
+    mode: 'generation',
+    onChunk: async chunk => { repaired += chunk; },
+  });
+  return parseFiles(repaired);
+}
+
 export async function POST(request: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -125,21 +160,48 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
   }
 
-  let files: { path: string; content: string }[];
-  try {
-    files = ensureCompleteNextProject(parseFiles(generated));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Generated project failed completeness validation.';
-    console.error('[NEXA PROPOSAL VALIDATION ERROR]', message);
-    return NextResponse.json({ error: message }, { status: 422 });
+  let files = parseFiles(generated);
+  if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
+
+  // Never save an incomplete proposal. Give the same provider/failover engine a targeted
+  // repair pass so missing shell files (especially src/app/page.tsx) are generated instead
+  // of creating fake placeholders or forcing the user to regenerate manually.
+  let validationError = '';
+  for (let repairAttempt = 0; repairAttempt < 2; repairAttempt++) {
+    try {
+      files = ensureCompleteNextProject(files);
+      validationError = '';
+      break;
+    } catch (error) {
+      validationError = error instanceof Error ? error.message : String(error);
+      console.warn(`[NEXA PROPOSAL REPAIR] attempt=${repairAttempt + 1}: ${validationError}`);
+      if (repairAttempt === 1) {
+        console.error('[NEXA PROPOSAL VALIDATION ERROR]', validationError);
+        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: 2 }, { status: 422 });
+      }
+      try {
+        const repairedFiles = await repairGeneratedProject({
+          provider,
+          keysByProvider: failoverKeysByProvider,
+          originalMessages: messages,
+          currentFiles: files,
+          validationError,
+        });
+        if (!repairedFiles.length) throw new Error('Repair provider returned no file blocks.');
+        const byPath = new Map(files.map(file => [file.path, file]));
+        repairedFiles.forEach(file => byPath.set(file.path, file));
+        const merged: { path: string; content: string }[] = [];
+        byPath.forEach(file => merged.push(file));
+        files = merged;
+      } catch (repairError) {
+        const repairMessage = repairError instanceof Error ? repairError.message : String(repairError);
+        console.error('[NEXA PROPOSAL REPAIR FAILED]', repairMessage);
+        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: repairAttempt + 1 }, { status: 422 });
+      }
+    }
   }
 
   generated = serializeFileBlocks(files);
-  console.log('[NEXA PROPOSAL RESPONSE]', JSON.stringify({ projectId, provider, files: files.length, generatedLength: generated.length }));
-  if (!files.length) {
-    console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
-    return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
-  }
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
   const { data: proposal, error: proposalError } = await supabase
