@@ -8,7 +8,8 @@ export const MODELS: Record<Provider, readonly string[]> = {
 };
 
 const CHAT_OUTPUT_TOKENS = 4096;
-const GENERATION_OUTPUT_TOKENS = 32768;
+const GENERATION_OUTPUT_TOKENS = 8192;
+const REPAIR_OUTPUT_TOKENS = 4096;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
 const MAX_CONTINUATIONS = 3;
@@ -87,9 +88,9 @@ function isTruncationReason(value: unknown): boolean {
   return typeof value === 'string' && /^(length|max_tokens|max_tokens_exceeded|MAX_TOKENS)$/i.test(value);
 }
 
-async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' = 'chat'): AsyncGenerator<string> {
+async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' | 'repair' = 'chat'): AsyncGenerator<string> {
   const controller = new AbortController();
-  const timeoutMs = mode === 'generation' ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
+  const timeoutMs = mode === 'generation' || mode === 'repair' ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
   let timeout = setTimeout(() => controller.abort(), timeoutMs);
   const resetTimeout = () => {
     clearTimeout(timeout);
@@ -154,7 +155,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
-    const outputTokens = mode === 'generation' ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
+    const outputTokens = mode === 'generation' ? GENERATION_OUTPUT_TOKENS : mode === 'repair' ? REPAIR_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
     const response = await fetch(url, {
       method: 'POST',
       headers,
@@ -215,7 +216,7 @@ function isModelError(error: unknown): boolean {
   return error instanceof ProviderError && error.status === 404;
 }
 
-async function collectAttempt(attempt: Attempt, mode: 'chat' | 'generation'): Promise<string> {
+async function collectAttempt(attempt: Attempt, mode: 'chat' | 'generation' | 'repair'): Promise<string> {
   let output = '';
   for await (const chunk of callProviderStream(attempt, mode)) output += chunk;
   return output;
@@ -330,7 +331,7 @@ export async function streamWithFailover({
   keys: string[] | FailoverKey[];
   keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
-  mode?: 'chat' | 'generation';
+  mode?: 'chat' | 'generation' | 'repair';
 }): Promise<void> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
@@ -343,6 +344,16 @@ export async function streamWithFailover({
 
   for (const currentProvider of orderedProviders) {
     const providerKeys = allKeys[currentProvider] ?? [];
+    // Groq's on-demand TPM can reject large generation prompts before any output
+    // is produced. Skip it rather than wasting a failover attempt when the input
+    // alone is already above the practical ~8k-token budget.
+    if (mode === 'generation' && currentProvider === 'groq') {
+      const promptChars = messages.reduce((total, message) => total + message.content.length, 0);
+      if (promptChars > 30000) {
+        tried.push({ provider: currentProvider, keysTried: 0, modelsTried: [], lastError: 'Generation prompt is too large for Groq on-demand TPM; skipped.' });
+        continue;
+      }
+    }
     if (!providerKeys.length || (cooldownUntil[currentProvider] ?? 0) > Date.now()) continue;
     const models = modelsFor(currentProvider);
     const info = { provider: currentProvider, keysTried: 0, modelsTried: [] as string[], lastError: '' };

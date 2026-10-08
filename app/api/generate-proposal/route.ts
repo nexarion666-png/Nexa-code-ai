@@ -52,31 +52,38 @@ async function repairGeneratedProject({
   currentFiles: { path: string; content: string }[];
   validationError: string;
 }) {
-  // Keep repair requests small and independent from the original conversation.
-  // The original generation can be very large and the first provider may have
-  // just hit its rate/context limit. Repair should be a focused second pass.
-  const offendingMatch = validationError.match(/^Generated file ([^ ]+) imports missing local module (.+)\.$/);
-  const offendingPath = offendingMatch?.[1] ?? '';
+  // Repair must be a small, focused request. Re-sending the original generation
+  // history + every existing project file can exceed provider TPM/credit limits.
+  const missingImportMatch = validationError.match(/Generated file\s+([^\s]+)\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
+  const missingFileMatch = validationError.match(/(?:requires|missing|Missing)\s+(?:file\s+)?([^\s,.]+\.(?:tsx?|jsx?|json|css|md))/i);
+  const relevantPath = missingImportMatch?.[1] || missingFileMatch?.[1] || '';
   const relevant = currentFiles.filter(file =>
     file.path === 'package.json' ||
     file.path === 'tsconfig.json' ||
-    file.path === offendingPath
-  );
-  const relevantContext = relevant.length
-    ? relevant.map(file => `---CURRENT: ${file.path}---\n${file.content}`).join('\n\n')
-    : '(No supporting files were available.)';
-  const existingPaths = currentFiles.map(file => file.path).join('\n');
-  const repairPrompt: AIMessage = {
-    role: 'user',
-    content: `Repair this generated Next.js project. Return ONLY the missing or invalid files needed to make validation pass. Do not rewrite valid files. Do not create placeholders.\n\nVALIDATION ERROR:\n${validationError}\n\nGENERATED FILE PATHS:\n${existingPaths || '(none)'}\n\nRELEVANT CURRENT FILES:\n${relevantContext}\n\nRules:\n- Follow package.json and tsconfig.json exactly.\n- Resolve @/* and relative imports exactly as tsconfig.json defines them.\n- If a module is missing, create the real module with the types/utilities/components required by its imports; do not fake an empty export.\n- If the homepage/layout is missing, generate the real production-ready file required by the existing project.\n- Output ONLY FILE blocks, each exactly: ---FILE: path/to/file.tsx--- followed by the complete file content.`,
+    file.path === relevantPath ||
+    (relevantPath && file.path.startsWith(relevantPath.replace(/\/[^/]+$/, '') + '/')) ||
+    /(^|\/)(layout|page|utils|types|index)\.(tsx?|jsx?)$/.test(file.path),
+  ).slice(0, 12);
+  const context = relevant.map(file => `---CURRENT: ${file.path}---\n${file.content}`).join('\n');
+  const repairSystem: AIMessage = {
+    role: 'system',
+    content: `You are Nexa's focused project-repair agent. Fix ONLY the validation failure below. Do not redesign the project. Do not replace valid files. Do not create fake placeholders. Output ONLY complete FILE blocks. Keep the existing framework, aliases, and conventions.\n\nVALIDATION ERROR:\n${validationError}\n\nRELEVANT CURRENT FILES:\n${context || '(none)'}`,
   };
+  const repairUser: AIMessage = {
+    role: 'user',
+    content: `Create every real file required to resolve this validation error. If an import such as @/types is missing, create the correct module at the path implied by tsconfig.json and the importing code. Preserve compatibility with the current project. Output only:\n---FILE: path/to/file.tsx---\nfull file content`,
+  };
+
+  // Prefer a different provider for repair when the original provider just failed;
+  // streamWithFailover will still fall through all configured providers.
+  const repairProvider: Provider = provider === 'gemini' ? 'groq' : 'gemini';
   let repaired = '';
   await streamWithFailover({
-    provider,
-    messages: [repairPrompt],
-    keys: keysByProvider[provider] ?? [],
+    provider: repairProvider,
+    messages: [repairSystem, repairUser],
+    keys: keysByProvider[repairProvider] ?? [],
     keysByProvider,
-    mode: 'generation',
+    mode: 'repair',
     onChunk: async chunk => { repaired += chunk; },
   });
   return parseFiles(repaired);
@@ -174,7 +181,7 @@ export async function POST(request: Request) {
   // repair pass so missing shell files (especially src/app/page.tsx) are generated instead
   // of creating fake placeholders or forcing the user to regenerate manually.
   let validationError = '';
-  for (let repairAttempt = 0; repairAttempt < 3; repairAttempt++) {
+  for (let repairAttempt = 0; repairAttempt < 2; repairAttempt++) {
     try {
       files = ensureCompleteNextProject(files);
       validationError = '';
@@ -184,18 +191,11 @@ export async function POST(request: Request) {
       console.warn(`[NEXA PROPOSAL REPAIR] attempt=${repairAttempt + 1}: ${validationError}`);
       if (repairAttempt === 1) {
         console.error('[NEXA PROPOSAL VALIDATION ERROR]', validationError);
-        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: repairAttempt + 1 }, { status: 422 });
+        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: 2 }, { status: 422 });
       }
       try {
-        // Prefer a different provider for repair when one is available. The
-        // initial generation may have consumed the requested provider's quota.
-        const repairCandidates: Provider[] = ['groq', 'openrouter', 'gemini'];
-        const repairProvider = repairCandidates.find(candidate =>
-          candidate !== provider &&
-          (failoverKeysByProvider[candidate] ?? []).length > 0
-        ) ?? provider;
         const repairedFiles = await repairGeneratedProject({
-          provider: repairProvider,
+          provider,
           keysByProvider: failoverKeysByProvider,
           currentFiles: files,
           validationError,
