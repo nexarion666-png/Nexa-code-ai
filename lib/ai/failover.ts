@@ -9,6 +9,7 @@ export const MODELS: Record<Provider, readonly string[]> = {
 
 const CHAT_OUTPUT_TOKENS = 4096;
 const GENERATION_OUTPUT_TOKENS = 8192;
+const OPENROUTER_GENERATION_OUTPUT_TOKENS = 4096;
 const REPAIR_OUTPUT_TOKENS = 4096;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
@@ -155,7 +156,9 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
-    const outputTokens = mode === 'generation' ? GENERATION_OUTPUT_TOKENS : mode === 'repair' ? REPAIR_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
+    const outputTokens = mode === 'generation'
+      ? (attempt.provider === 'openrouter' ? OPENROUTER_GENERATION_OUTPUT_TOKENS : GENERATION_OUTPUT_TOKENS)
+      : mode === 'repair' ? REPAIR_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
     const response = await fetch(url, {
       method: 'POST',
       headers,
@@ -203,13 +206,19 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
 }
 
 function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === 429 || error.status === 408 || /quota|rate.?limit|too many requests|temporarily unavailable|high demand/i.test(error.message);
+  if (error instanceof ProviderError) return error.status === 429 || error.status === 402 || error.status === 408 || /quota|rate.?limit|too many requests|temporarily unavailable|high demand|in.?flight.*budget|available credits|add credits/i.test(error.message);
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
 }
 
 function isDeadKeyError(error: unknown): boolean {
   if (!(error instanceof ProviderError)) return false;
   return error.status === 401 || error.status === 403 || error.status === 429 || /quota|rate.?limit|invalid api key|unauthorized/i.test(error.message);
+}
+
+function cooldownSecondsFor(error: unknown): number {
+  if (error instanceof ProviderError && error.status === 402 && /in.?flight.*budget|available credits/i.test(error.message)) return 120;
+  if (error instanceof ProviderError && error.status === 408) return 20;
+  return 60;
 }
 
 function isModelError(error: unknown): boolean {
@@ -299,7 +308,7 @@ export function createStreamingFailover({
               console.error(`[STREAM FAIL] ${provider} ${model}: ${lastErr}`);
               controller.enqueue(`${SWITCH_PREFIX}${provider}`);
               if (isCooldownError(error)) {
-                startCooldown(provider, error instanceof ProviderError && error.status === 408 ? 20 : 60);
+                startCooldown(provider, cooldownSecondsFor(error));
                 break;
               }
               if (isDeadKeyError(error)) break;
@@ -370,6 +379,10 @@ export async function streamWithFailover({
             output = await collectAttempt(attempt, mode);
           } catch (error) {
             if (!(error instanceof ProviderError) || error.code !== 'TRUNCATED_OUTPUT' || !error.partialOutput || mode !== 'generation') throw error;
+            if (currentProvider === 'openrouter') {
+              console.warn(`[STREAM TRUNCATED] ${currentProvider} ${model} at ${error.partialOutput.length} chars; switching model instead of issuing an immediate continuation request.`);
+              throw error;
+            }
             console.warn(`[STREAM CONTINUE] ${currentProvider} ${model} truncated at ${error.partialOutput.length} chars; continuing.`);
             output = await continueGeneration(attempt, error.partialOutput);
           }
@@ -382,7 +395,7 @@ export async function streamWithFailover({
           info.lastError = lastError;
           console.error(`[STREAM FAIL] ${currentProvider} ${model}: ${lastError}`);
           if (isCooldownError(error)) {
-            startCooldown(currentProvider, error instanceof ProviderError && error.status === 408 ? 20 : 60);
+            startCooldown(currentProvider, cooldownSecondsFor(error));
             break;
           }
           if (isDeadKeyError(error)) break;
