@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { parseFailoverError, streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
+import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
-import { ensureCompleteNextProject, ProjectCompletenessError, serializeFileBlocks } from '@/lib/project-completeness';
+import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -32,11 +32,11 @@ function parseFiles(content: string) {
       .replace(/^\n/, '')
       .replace(/\s+$/, '\n');
     if (!path || path.includes('..') || path.includes('\\')) continue;
-    // Last duplicate wins. This is important when a continuation repeats a file
-    // with a completed version after an earlier truncated version.
+    // Last complete occurrence wins. This prevents an earlier truncated duplicate
+    // from replacing a later complete version of the same file.
     byPath.set(path, { path, content: fileContent });
   }
-  for (const file of byPath.values()) files.push(file);
+  byPath.forEach(file => files.push(file));
   return files;
 }
 
@@ -104,33 +104,28 @@ export async function POST(request: Request) {
     await streamWithFailover({
       provider,
       messages,
-      keys: keysByProvider[provider],
+      keys: failoverKeysByProvider[provider],
       keysByProvider: failoverKeysByProvider,
+      mode: 'generation',
       onChunk: async chunk => { generated += chunk; },
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
-    const parsed = parseFailoverError(raw);
-    if (parsed?.code === 'KEYS_EXHAUSTED') {
+    if (raw.startsWith('KEYS_EXHAUSTED::')) {
+      const payload = raw.slice('KEYS_EXHAUSTED::'.length);
+      const separator = payload.lastIndexOf('::');
+      const triedJson = separator >= 0 ? payload.slice(0, separator) : payload;
+      const lastErr = separator >= 0 ? payload.slice(separator + 2) : 'All providers failed';
+      let tried: unknown[] = [];
+      try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
       console.error('[NEXA PROPOSAL KEYS_EXHAUSTED]', error);
-      return NextResponse.json({ error: 'KEYS_EXHAUSTED', tried: parsed.tried, message: parsed.message, retryAfter: 60 }, { status: 429 });
-    }
-    if (parsed?.code === 'AI_UNAVAILABLE') {
-      console.error('[NEXA PROPOSAL AI_UNAVAILABLE]', error);
-      return NextResponse.json({ error: 'AI_UNAVAILABLE', tried: parsed.tried, message: parsed.message, retryAfter: 30 }, { status: 503 });
+      return NextResponse.json({ error: 'KEYS_EXHAUSTED', tried, message: lastErr, retryAfter: 60 }, { status: 429 });
     }
     console.error('[NEXA PROPOSAL ERROR]', error);
-    return NextResponse.json({ error: 'Nexa could not generate the proposal.', message: raw }, { status: 502 });
+    return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
   }
 
-  let files: ReturnType<typeof parseFiles>;
-  try {
-    files = ensureCompleteNextProject(parseFiles(generated), { requireShell: existingFiles.length === 0 });
-  } catch (error) {
-    const message = error instanceof ProjectCompletenessError ? error.message : 'Generated project failed completeness validation.';
-    console.error('[NEXA PROPOSAL INCOMPLETE]', message);
-    return NextResponse.json({ error: 'INCOMPLETE_PROJECT', message }, { status: 422 });
-  }
+  const files = ensureCompleteNextProject(parseFiles(generated));
   generated = serializeFileBlocks(files);
   if (!files.length) console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);
   if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
