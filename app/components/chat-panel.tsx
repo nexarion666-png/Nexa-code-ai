@@ -90,7 +90,16 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
       const reader=response.body.getReader(); const decoder=new TextDecoder(); const parser=sseParser(); let done=false;
       while(!done){ const {value,done:readDone}=await reader.read(); if(readDone) break; const events=parser.push(decoder.decode(value,{stream:true})); for(const event of events){
         if(event.type==='chunk'){ window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:switchingProvider==='groq'?'fallback':'primary'})); } if(event.type==='chunk') setMessages(prev=>{const copy=[...prev]; const last=copy[copy.length-1]; if(last?.role==='assistant') copy[copy.length-1]={...last,content:last.content+event.text}; return copy;});
-        if(event.type==='done'){ done=true; setSwitchingProvider(''); if(event.proposalReady) setProposalReady(true); }
+        if(event.type==='done'){
+          done=true;
+          setSwitchingProvider('');
+          // Any concrete edit/fix request must expose the proposal action after
+          // Nexa finishes its analysis, even if the model omits the
+          // [PROPOSAL_READY] marker. The marker is an AI output hint, not a
+          // reliable UI state signal. This keeps Describe -> Proposal working
+          // consistently across repeated fixes.
+          if(event.proposalReady || editRequest) setProposalReady(true);
+        }
         if(event.type==='switching'){ setSwitchingProvider(event.provider); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:event.provider==='groq'?'fallback':'primary'})); }
         if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All configured keys are rate-limited or invalid.',retryAfter:event.retryAfter ?? 60}); setError(''); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
         if(event.type==='provider_error'){ setError(event.message || 'AI providers could not complete the request right now.'); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'fallback'})); throw new Error('AI_UNAVAILABLE'); }
