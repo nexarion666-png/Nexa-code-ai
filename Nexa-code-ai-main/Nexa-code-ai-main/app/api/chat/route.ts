@@ -115,7 +115,7 @@ export async function POST(request: Request) {
   if (saveUserError) return NextResponse.json({ error: saveUserError.message }, { status: 500 });
 
   const encoder = new TextEncoder();
-  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: systemPrompt, isChat: true });
+  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: systemPrompt, isChat: true, outputTokens: 3072 });
   const reader = failoverStream.getReader();
   let first: ReadableStreamReadResult<string>;
   try {

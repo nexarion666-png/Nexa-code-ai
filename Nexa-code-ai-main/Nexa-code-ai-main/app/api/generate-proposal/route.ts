@@ -3,7 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
-import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
+import { ensureNextProjectShell, ensureProjectPackage, type ProjectFile } from '@/lib/project-completeness';
 
 export const runtime = 'nodejs';
 
@@ -17,17 +17,20 @@ List ALL files needed for feature. Production-ready Next.js 14 Tailwind code. No
 const FILE_PATTERN = /---FILE:\s*(.+?)---\s*([\s\S]*?)(?=---FILE:|$)/g;
 
 function parseFiles(content: string) {
-  const files: { path: string; content: string }[] = [];
-  const seen = new Set<string>();
+  const byPath = new Map<string, { path: string; content: string }>();
+  FILE_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = FILE_PATTERN.exec(content)) !== null) {
     const path = match[1].trim().replace(/^['"]|['"]$/g, '').replace(/^\/+/, '');
-    const fileContent = match[2].replace(/^\n/, '').replace(/\s+$/, '\n');
-    if (!path || path.includes('..') || path.includes('\\') || seen.has(path)) continue;
-    seen.add(path);
-    files.push({ path, content: fileContent });
+    const fileContent = match[2]
+      .replace(/^\s*```[\w-]*\r?\n/, '')
+      .replace(/\r?\n?```\s*$/, '')
+      .replace(/^\n/, '')
+      .replace(/\s+$/, '\n');
+    if (!path || path.includes('..') || path.includes('\\')) continue;
+    byPath.set(path, { path, content: fileContent });
   }
-  return files;
+  return Array.from(byPath.values());
 }
 
 export async function POST(request: Request) {
@@ -91,6 +94,7 @@ export async function POST(request: Request) {
       keys: keysByProvider[provider],
       keysByProvider: failoverKeysByProvider,
       onChunk: async chunk => { generated += chunk; },
+      outputTokens: 16384,
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
@@ -109,9 +113,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
   }
 
-  const files = ensureCompleteNextProject(parseFiles(generated));
-  generated = serializeFileBlocks(files);
+  let files = parseFiles(generated);
   if (!files.length) return NextResponse.json({ error: 'Nexa returned no file blocks. Ask Nexa to clarify the feature and try again.' }, { status: 422 });
+
+  files = ensureProjectPackage(files) as ProjectFile[];
+  const completeness = ensureNextProjectShell(files);
+  if (completeness.errors.length) {
+    console.error('[NEXA INCOMPLETE PROPOSAL]', completeness.errors);
+    return NextResponse.json({ error: 'Nexa stopped before producing a complete project. Please regenerate the proposal.', details: completeness.errors, warnings: completeness.warnings }, { status: 422 });
+  }
+  if (completeness.warnings.length) console.warn('[NEXA PROJECT SHELL]', completeness.warnings);
+  files = completeness.files;
+  generated = files.map(file => `---FILE: ${file.path}---\n${file.content}`).join('\n');
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
   const { data: proposal, error: proposalError } = await supabase
