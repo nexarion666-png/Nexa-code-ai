@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
+import { parseFailoverError, streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
-import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
+import { ensureCompleteNextProject, ProjectCompletenessError, serializeFileBlocks } from '@/lib/project-completeness';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const SYSTEM = `You are Nexa, senior full-stack dev. Based on conversation, output detailed plan, then output files EXACTLY like:
 ---FILE: app/page.tsx---
@@ -32,9 +32,12 @@ function parseFiles(content: string) {
       .replace(/^\n/, '')
       .replace(/\s+$/, '\n');
     if (!path || path.includes('..') || path.includes('\\')) continue;
+    // Last duplicate wins. This is important when a continuation repeats a file
+    // with a completed version after an earlier truncated version.
     byPath.set(path, { path, content: fileContent });
   }
-  return Array.from(byPath.values());
+  for (const file of byPath.values()) files.push(file);
+  return files;
 }
 
 export async function POST(request: Request) {
@@ -103,32 +106,30 @@ export async function POST(request: Request) {
       messages,
       keys: keysByProvider[provider],
       keysByProvider: failoverKeysByProvider,
-      outputTokens: 16384,
       onChunk: async chunk => { generated += chunk; },
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
-    if (raw.startsWith('KEYS_EXHAUSTED::')) {
-      const payload = raw.slice('KEYS_EXHAUSTED::'.length);
-      const separator = payload.lastIndexOf('::');
-      const triedJson = separator >= 0 ? payload.slice(0, separator) : payload;
-      const lastErr = separator >= 0 ? payload.slice(separator + 2) : 'All providers failed';
-      let tried: unknown[] = [];
-      try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
+    const parsed = parseFailoverError(raw);
+    if (parsed?.code === 'KEYS_EXHAUSTED') {
       console.error('[NEXA PROPOSAL KEYS_EXHAUSTED]', error);
-      return NextResponse.json({ error: 'KEYS_EXHAUSTED', tried, message: lastErr, retryAfter: 60 }, { status: 429 });
+      return NextResponse.json({ error: 'KEYS_EXHAUSTED', tried: parsed.tried, message: parsed.message, retryAfter: 60 }, { status: 429 });
+    }
+    if (parsed?.code === 'AI_UNAVAILABLE') {
+      console.error('[NEXA PROPOSAL AI_UNAVAILABLE]', error);
+      return NextResponse.json({ error: 'AI_UNAVAILABLE', tried: parsed.tried, message: parsed.message, retryAfter: 30 }, { status: 503 });
     }
     console.error('[NEXA PROPOSAL ERROR]', error);
-    return NextResponse.json({ error: 'Nexa could not generate the proposal.' }, { status: 502 });
+    return NextResponse.json({ error: 'Nexa could not generate the proposal.', message: raw }, { status: 502 });
   }
 
-  let files: { path: string; content: string }[];
+  let files: ReturnType<typeof parseFiles>;
   try {
-    files = ensureCompleteNextProject(parseFiles(generated), safeHistory.map(message => message.content).join('\n'));
+    files = ensureCompleteNextProject(parseFiles(generated), { requireShell: existingFiles.length === 0 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Generated project is incomplete.';
+    const message = error instanceof ProjectCompletenessError ? error.message : 'Generated project failed completeness validation.';
     console.error('[NEXA PROPOSAL INCOMPLETE]', message);
-    return NextResponse.json({ error: message }, { status: 422 });
+    return NextResponse.json({ error: 'INCOMPLETE_PROJECT', message }, { status: 422 });
   }
   generated = serializeFileBlocks(files);
   if (!files.length) console.error('[NEXA PROPOSAL NO FILE BLOCKS]', JSON.stringify(generated.slice(0, 500)), `length=${generated.length}`);

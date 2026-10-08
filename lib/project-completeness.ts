@@ -1,14 +1,39 @@
 export type ProjectFile = { path: string; content: string };
 
-const DEFAULT_PACKAGE = {
-  name: 'nexa-generated-app', version: '0.1.0', private: true,
-  scripts: { dev: 'next dev', build: 'next build', start: 'next start', lint: 'next lint' },
-  dependencies: { next: '14.2.15', react: '^18.3.1', 'react-dom': '^18.3.1' },
-  devDependencies: { '@types/node': '^20.17.10', '@types/react': '^18.3.12', '@types/react-dom': '^18.3.1', autoprefixer: '^10.4.20', postcss: '^8.4.49', tailwindcss: '^3.4.16', typescript: '^5.7.2' },
-};
+export class ProjectCompletenessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectCompletenessError';
+  }
+}
 
-function get(files: ProjectFile[], path: string) { return files.find(file => file.path === path); }
-function upsert(files: ProjectFile[], path: string, content: string) { if (!get(files, path)) files.push({ path, content }); }
+function normalizePath(path: string) {
+  const parts: string[] = [];
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') { parts.pop(); continue; }
+    parts.push(part);
+  }
+  return parts.join('/').replace(/^\/+/, '');
+}
+
+function isPathSafe(path: string) {
+  return Boolean(path) && !path.includes('..') && !path.includes('\\') && !path.startsWith('/');
+}
+
+function dedupeLast(files: ProjectFile[]) {
+  const byPath = new Map<string, ProjectFile>();
+  for (const file of files) {
+    const path = normalizePath(file.path);
+    if (!isPathSafe(path)) continue;
+    byPath.set(path, { path, content: file.content });
+  }
+  return [...byPath.values()];
+}
+
+function get(files: ProjectFile[], path: string) {
+  return files.find(file => file.path === path);
+}
 
 function looksLikeNextProject(files: ProjectFile[]) {
   const packageFile = get(files, 'package.json');
@@ -16,88 +41,124 @@ function looksLikeNextProject(files: ProjectFile[]) {
     try {
       const pkg = JSON.parse(packageFile.content) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
       return Boolean(pkg.dependencies?.next || pkg.devDependencies?.next);
-    } catch { return true; }
+    } catch {
+      return true;
+    }
   }
   return files.some(file => /^app\/(layout|page)\.(tsx?|jsx?)$/.test(file.path) || /^pages\/(index|_app)\.(tsx?|jsx?)$/.test(file.path));
 }
 
-function packageContent(files: ProjectFile[]) {
-  const packageFile = get(files, 'package.json');
-  let pkg: any;
-  try { pkg = packageFile ? JSON.parse(packageFile.content) : { ...DEFAULT_PACKAGE }; } catch { pkg = { ...DEFAULT_PACKAGE }; }
-  pkg.name = typeof pkg.name === 'string' && pkg.name.trim() ? pkg.name : DEFAULT_PACKAGE.name;
-  pkg.version = typeof pkg.version === 'string' ? pkg.version : DEFAULT_PACKAGE.version;
-  pkg.private = true;
-  pkg.scripts = { ...DEFAULT_PACKAGE.scripts, ...(pkg.scripts ?? {}) };
-  pkg.dependencies = { ...(pkg.dependencies ?? {}), ...DEFAULT_PACKAGE.dependencies };
-  pkg.devDependencies = { ...(pkg.devDependencies ?? {}), ...DEFAULT_PACKAGE.devDependencies };
-  return JSON.stringify(pkg, null, 2) + '\n';
-}
-
-function routeToFiles(route: string) {
-  const clean = route.split('?')[0].replace(/^\/+|\/+$/g, '');
-  if (!clean) return ['app/page.tsx', 'app/page.jsx', 'pages/index.tsx', 'pages/index.jsx'];
-  const segments = clean.split('/');
-  const dynamic = segments.map(segment => segment.startsWith(':') ? `[${segment.slice(1)}]` : segment);
-  const base = dynamic.join('/');
-  return [`app/${base}/page.tsx`, `app/${base}/page.jsx`, `pages/${base}.tsx`, `pages/${base}.jsx`];
-}
-
-function hasRoute(files: ProjectFile[], route: string) { return routeToFiles(route).some(path => Boolean(get(files, path))); }
-
-function requestedRoutes(requirements: string) {
-  const found = new Set<string>();
-  const regex = /(?:^|\s|[(:])\/(?!\/)[a-zA-Z0-9_\-\[\]:]+(?:\/[a-zA-Z0-9_\-\[\]:]+)*/g;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(requirements)) !== null) {
-    const route = match[0].trim().replace(/^[(:\s]+/, '');
-    if (route && route !== '/api' && !route.includes('http')) found.add(route);
-  }
-  return Array.from(found);
-}
-
-function validateSource(files: ProjectFile[]) {
-  const errors: string[] = [];
-  for (const file of files) {
-    const content = file.content.trim();
-    if (!content) { errors.push(`${file.path} is empty`); continue; }
-    if (/```(?:tsx?|jsx?|json|css|js)?\s*$|^```/.test(content)) errors.push(`${file.path} contains an unfinished code fence`);
-    if (/\b(?:TODO|FIXME)\s*:\s*(?:complete|implement|finish)/i.test(content)) errors.push(`${file.path} contains an unfinished implementation marker`);
-    if (file.path.endsWith('.json')) {
-      try { JSON.parse(content); } catch { errors.push(`${file.path} is not valid JSON`); }
+function validateJson(files: ProjectFile[]) {
+  for (const path of ['package.json', 'tsconfig.json']) {
+    const file = get(files, path);
+    if (!file) continue;
+    try {
+      JSON.parse(file.content);
+    } catch (error) {
+      throw new ProjectCompletenessError(`${path} is not valid JSON and will not be saved.`);
     }
   }
-  return errors;
 }
 
-export function ensureCompleteNextProject(input: ProjectFile[], requirements = '') {
-  const files = input.map(file => ({ path: file.path, content: file.content }));
+function obviousTruncation(file: ProjectFile) {
+  const content = file.content.trim();
+  if (!content) return true;
+  if (/```$/.test(content)) return true;
+  if (/^(?:import|export)\s+[^\n]*\bfrom\s*['"][^'"]*$/.test(content)) return true;
+  const last = content.split(/\r?\n/).at(-1)?.trim() ?? '';
+  if (/^(?:const|let|var|return|throw|await|new)\b.*(?:=|\(|\{|\[|,)$/.test(last)) return true;
+  if (/[({\[]\s*$/.test(last)) return true;
+  return false;
+}
+
+function validateContents(files: ProjectFile[]) {
+  for (const file of files) {
+    if (obviousTruncation(file)) throw new ProjectCompletenessError(`Generated file ${file.path} is empty or appears truncated.`);
+    if (/^```[\w-]*\s*$/m.test(file.content)) throw new ProjectCompletenessError(`Generated file ${file.path} contains an unfinished code fence.`);
+  }
+}
+
+function resolveLocalImport(fromPath: string, specifier: string, files: Set<string>) {
+  const base = specifier.startsWith('@/')
+    ? specifier.slice(2)
+    : specifier.startsWith('./') || specifier.startsWith('../')
+      ? normalizePath(`${fromPath.split('/').slice(0, -1).join('/')}/${specifier}`)
+      : null;
+  if (!base) return true;
+  const candidates = [
+    base,
+    `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}.mjs`, `${base}.cjs`,
+    `${base}.css`, `${base}.json`,
+    `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`, `${base}/index.jsx`,
+  ];
+  return candidates.some(candidate => files.has(normalizePath(candidate)));
+}
+
+function validateLocalImports(files: ProjectFile[]) {
+  const paths = new Set(files.map(file => file.path));
+  const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\()(['"])([^'"]+)\1/g;
+  for (const file of files) {
+    importPattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = importPattern.exec(file.content)) !== null) {
+      const specifier = match[2];
+      if ((specifier.startsWith('@/') || specifier.startsWith('./') || specifier.startsWith('../')) && !resolveLocalImport(file.path, specifier, paths)) {
+        throw new ProjectCompletenessError(`Generated file ${file.path} imports missing local module ${specifier}.`);
+      }
+    }
+  }
+}
+
+function validatePackage(files: ProjectFile[]) {
+  const packageFile = get(files, 'package.json');
+  if (!packageFile) return;
+  let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
+  try {
+    pkg = JSON.parse(packageFile.content);
+  } catch {
+    return;
+  }
+  const deps = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]);
+  const builtin = new Set(['fs', 'path', 'url', 'crypto', 'http', 'https', 'os', 'stream', 'util', 'events', 'buffer', 'assert', 'child_process', 'zlib', 'net', 'tls', 'module', 'querystring', 'string_decoder', 'timers', 'worker_threads']);
+  const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|require\()(['"])([^'"./@][^'"]*|@[^/]+\/[^'"]+)\1/g;
+  for (const file of files) {
+    importPattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = importPattern.exec(file.content)) !== null) {
+      const specifier = match[2];
+      const packageName = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
+      if (!builtin.has(packageName) && !deps.has(packageName)) {
+        throw new ProjectCompletenessError(`Generated file ${file.path} imports ${packageName}, but package.json does not declare it.`);
+      }
+    }
+  }
+}
+
+export function ensureCompleteNextProject(input: ProjectFile[], options: { requireShell?: boolean } = {}) {
+  const files = dedupeLast(input);
+  if (!files.length) throw new ProjectCompletenessError('Nexa returned no files.');
   if (!looksLikeNextProject(files)) return files;
 
-  const packageJson = packageContent(files);
+  validateJson(files);
+  validateContents(files);
+  validatePackage(files);
+  validateLocalImports(files);
+
+  const requireShell = options.requireShell ?? true;
   const packageFile = get(files, 'package.json');
-  if (packageFile) packageFile.content = packageJson; else files.push({ path: 'package.json', content: packageJson });
+  if (requireShell) {
+    if (!packageFile) throw new ProjectCompletenessError('Complete Next.js generation requires package.json.');
+    let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
+    try { pkg = JSON.parse(packageFile.content); } catch { throw new ProjectCompletenessError('package.json is invalid JSON.'); }
+    if (!pkg.dependencies?.next && !pkg.devDependencies?.next) throw new ProjectCompletenessError('package.json does not declare Next.js.');
 
-  upsert(files, 'tsconfig.json', `{
-  "compilerOptions": { "target": "es5", "lib": ["dom", "dom.iterable", "esnext"], "allowJs": true, "skipLibCheck": true, "strict": true, "noEmit": true, "esModuleInterop": true, "module": "esnext", "moduleResolution": "bundler", "resolveJsonModule": true, "isolatedModules": true, "jsx": "preserve", "incremental": true, "plugins": [{ "name": "next" }], "paths": { "@/*": ["./*"] } },
-  "include": ["next-env.d.ts", ".next/types/**/*.ts", "**/*.ts", "**/*.tsx"], "exclude": ["node_modules"]
-}\n`);
-  upsert(files, 'next-env.d.ts', `/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n`);
-  upsert(files, 'next.config.js', `/** @type {import('next').NextConfig} */\nconst nextConfig = { reactStrictMode: true };\nmodule.exports = nextConfig;\n`);
-  upsert(files, 'postcss.config.js', `module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n`);
-  upsert(files, 'tailwind.config.ts', `import type { Config } from 'tailwindcss';\nconst config: Config = { content: ['./app/**/*.{js,ts,jsx,tsx,mdx}', './components/**/*.{js,ts,jsx,tsx,mdx}', './context/**/*.{js,ts,jsx,tsx,mdx}', './lib/**/*.{js,ts,jsx,tsx,mdx}'], theme: { extend: {} }, plugins: [] };\nexport default config;\n`);
-  upsert(files, 'app/globals.css', `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nhtml, body { min-height: 100%; }\nbody { margin: 0; }\n`);
-  upsert(files, 'app/layout.tsx', `import './globals.css';\nexport const metadata = { title: 'Nexa App', description: 'Generated with Nexa Code AI' };\nexport default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) { return <html lang="en"><body>{children}</body></html>; }\n`);
-
-  const hasHome = hasRoute(files, '/');
-  if (!hasHome) throw new Error('Nexa stopped before producing a complete project: app/page.tsx is missing.');
-
-  const errors = validateSource(files);
-  if (errors.length) throw new Error(`Nexa stopped before producing a complete project: ${errors.join('; ')}`);
-
-  const required = requestedRoutes(requirements).filter(route => route !== '/');
-  const missing = required.filter(route => !hasRoute(files, route));
-  if (missing.length) throw new Error(`Nexa stopped before producing a complete project: missing requested route file(s): ${missing.join(', ')}`);
+    const hasAppPage = Boolean(get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js'));
+    const hasPagesIndex = Boolean(get(files, 'pages/index.tsx') || get(files, 'pages/index.jsx') || get(files, 'pages/index.ts') || get(files, 'pages/index.js'));
+    if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx or pages/index.tsx. Nexa will not create a fake placeholder homepage.');
+    if (hasAppPage && !get(files, 'app/layout.tsx') && !get(files, 'app/layout.jsx') && !get(files, 'app/layout.ts') && !get(files, 'app/layout.js')) {
+      throw new ProjectCompletenessError('App Router generation requires app/layout.tsx.');
+    }
+  }
 
   return files;
 }

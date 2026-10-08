@@ -1,14 +1,22 @@
 export type Provider = 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
+// Keep the live matrix small and explicit. These IDs are current as of Oct 2026.
 export const MODELS: Record<Provider, readonly string[]> = {
-  // Current production-capable Gemini API IDs. Keep the stable model first.
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
-  // llama-3.3-70b-versatile was deprecated by Groq; use the current GPT-OSS models.
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
-  // OpenRouter model IDs are provider-qualified and currently available.
   openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
 };
+
+const CHAT_OUTPUT_TOKENS = 4096;
+const GENERATION_OUTPUT_TOKENS = 32768;
+const CHAT_TIMEOUT_MS = 30_000;
+const GENERATION_TIMEOUT_MS = 120_000;
+const MAX_CONTINUATIONS_CHAT = 1;
+const MAX_CONTINUATIONS_GENERATION = 2;
+const PROVIDER_COOLDOWN_MS = 60_000;
+const MAX_CONTINUATION_CONTEXT_CHARS = 80_000;
+const SWITCH_PREFIX = '__NEXA_PROVIDER_SWITCH__:';
 
 export class ProviderError extends Error {
   constructor(public provider: Provider, public status: number, message: string) {
@@ -25,11 +33,34 @@ type Attempt = {
   model: string;
   messages: AIMessage[];
   systemPrompt?: string;
-  outputTokens: number;
+  isChat?: boolean;
 };
 
-const cooldownUntil: Record<string, number> = {};
-const SWITCH_PREFIX = '__NEXA_PROVIDER_SWITCH__:';
+type FinishReason = string | null;
+
+type ProviderAttemptResult = {
+  text: string;
+  finishReason: FinishReason;
+  truncated: boolean;
+};
+
+type FailureKind = 'auth' | 'quota' | 'busy' | 'timeout' | 'network' | 'model' | 'truncated' | 'empty' | 'provider';
+
+type AttemptFailure = {
+  kind: FailureKind;
+  message: string;
+  status?: number;
+};
+
+type ProviderTrace = {
+  provider: Provider;
+  keysTried: number;
+  modelsTried: string[];
+  lastError: string;
+  failureKinds: FailureKind[];
+};
+
+const cooldownUntil: Partial<Record<Provider, number>> = {};
 
 export type CooldownStatus = Record<Provider, { cooldownUntil: number; cooldownSeconds: number }>;
 
@@ -43,17 +74,29 @@ export function getCooldownStatus(): CooldownStatus {
 }
 
 function startCooldown(provider: Provider) {
-  cooldownUntil[provider] = Date.now() + 60_000;
+  cooldownUntil[provider] = Date.now() + PROVIDER_COOLDOWN_MS;
+}
+
+function isCoolingDown(provider: Provider) {
+  return (cooldownUntil[provider] ?? 0) > Date.now();
 }
 
 function modelsFor(provider: Provider): readonly string[] {
   return MODELS[provider];
 }
 
+function outputTokens(isChat: boolean) {
+  return isChat ? CHAT_OUTPUT_TOKENS : GENERATION_OUTPUT_TOKENS;
+}
+
+function timeoutMs(isChat: boolean) {
+  return isChat ? CHAT_TIMEOUT_MS : GENERATION_TIMEOUT_MS;
+}
+
 async function assertOk(response: Response, provider: Provider): Promise<void> {
   if (response.ok) return;
   const text = await response.text().catch(() => '');
-  throw new ProviderError(provider, response.status, text.slice(0, 500) || `Provider returned ${response.status}`);
+  throw new ProviderError(provider, response.status, text.slice(0, 1200) || `Provider returned ${response.status}`);
 }
 
 async function* readSSE(body: ReadableStream<Uint8Array>, onActivity?: () => void): AsyncGenerator<string> {
@@ -69,32 +112,73 @@ async function* readSSE(body: ReadableStream<Uint8Array>, onActivity?: () => voi
       const events = buffer.split(/\r?\n\r?\n/);
       buffer = events.pop() ?? '';
       for (const event of events) {
-        const data = event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+        const data = event.split(/\r?\n/)
+          .filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart())
+          .join('\n');
         if (data) yield data;
       }
     }
     buffer += decoder.decode();
-    const data = buffer.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+    const data = buffer.split(/\r?\n/)
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trimStart())
+      .join('\n');
     if (data) yield data;
   } finally {
     reader.releaseLock();
   }
 }
 
-async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
+function finishReasonIsTruncated(provider: Provider, reason: FinishReason) {
+  if (!reason) return false;
+  const normalized = reason.toUpperCase();
+  return provider === 'gemini'
+    ? normalized === 'MAX_TOKENS' || normalized === 'MAX_OUTPUT_TOKENS' || normalized === 'LENGTH'
+    : normalized === 'LENGTH' || normalized === 'MAX_TOKENS' || normalized === 'MAX_COMPLETION_TOKENS';
+}
+
+function classifyFailure(error: unknown): AttemptFailure {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ProviderError) {
+    if (error.status === 401 || error.status === 403) return { kind: 'auth', status: error.status, message };
+    if (error.status === 429 || /quota|rate.?limit|too many requests/i.test(message)) return { kind: 'quota', status: error.status, message };
+    if (error.status === 404 || /model.*(not found|does not exist)|no endpoints found|not supported for generate/i.test(message)) return { kind: 'model', status: error.status, message };
+    if (error.status === 499 || /truncated|output was truncated/i.test(message)) return { kind: 'truncated', status: error.status, message };
+    if (error.status === 408 || error.status === 504) return { kind: 'timeout', status: error.status, message };
+    if (error.status === 500 || error.status === 502 || error.status === 503) return { kind: 'busy', status: error.status, message };
+    return { kind: 'provider', status: error.status, message };
+  }
+  if (error instanceof Error && error.name === 'AbortError') return { kind: 'timeout', message: 'Provider request timed out.' };
+  if (/network|fetch failed|socket|ECONN|ETIMEDOUT|timed out|timeout/i.test(message)) return { kind: 'network', message };
+  if (/truncated|length|MAX_TOKENS|MAX_OUTPUT/i.test(message)) return { kind: 'truncated', message };
+  return { kind: 'provider', message };
+}
+
+function formatFailure(failure: AttemptFailure) {
+  return failure.status ? `${failure.kind} (${failure.status}): ${failure.message}` : `${failure.kind}: ${failure.message}`;
+}
+
+function isKeyExhaustionKind(kind: FailureKind) {
+  return kind === 'auth' || kind === 'quota';
+}
+
+function isProviderCooldownKind(kind: FailureKind) {
+  return kind === 'busy' || kind === 'timeout' || kind === 'network';
+}
+
+async function callProviderStream(attempt: Attempt, messages: AIMessage[]): Promise<ProviderAttemptResult> {
   const controller = new AbortController();
-  let timeout = setTimeout(() => controller.abort(), 8_000);
-  const resetTimeout = () => {
-    clearTimeout(timeout);
-    timeout = setTimeout(() => controller.abort(), 8_000);
-  };
+  const timeout = setTimeout(() => controller.abort(), timeoutMs(Boolean(attempt.isChat)));
+  let text = '';
+  let finishReason: FinishReason = null;
 
   try {
     if (attempt.provider === 'gemini') {
-      const contents = attempt.messages
+      const contents = messages
         .filter(message => message.role !== 'system')
         .map(message => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [{ text: message.content }] }));
-      const system = attempt.systemPrompt ?? attempt.messages.find(message => message.role === 'system')?.content;
+      const system = attempt.systemPrompt ?? messages.find(message => message.role === 'system')?.content;
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(attempt.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(attempt.key.value)}`,
         {
@@ -103,88 +187,129 @@ async function* callProviderStream(attempt: Attempt): AsyncGenerator<string> {
           body: JSON.stringify({
             ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
             contents,
-            generationConfig: { temperature: 0.2, maxOutputTokens: attempt.outputTokens },
+            generationConfig: {
+              temperature: 0.2,
+              maxOutputTokens: outputTokens(Boolean(attempt.isChat)),
+              ...(attempt.isChat ? { thinkingConfig: { thinkingLevel: 'low' } } : { thinkingConfig: { thinkingLevel: 'medium' } }),
+            },
           }),
           signal: controller.signal,
         },
       );
       await assertOk(response, attempt.provider);
       if (!response.body) throw new ProviderError(attempt.provider, 500, 'Streaming response was empty.');
-      let finishReason = '';
-      for await (const payload of readSSE(response.body, resetTimeout)) {
+      for await (const payload of readSSE(response.body)) {
         if (payload === '[DONE]') continue;
         try {
           const json: unknown = JSON.parse(payload);
           const candidates = (json as { candidates?: unknown })?.candidates;
           if (!Array.isArray(candidates)) continue;
-          const candidate = candidates[0] as { content?: unknown; finishReason?: unknown };
-          if (typeof candidate.finishReason === 'string') finishReason = candidate.finishReason;
-          const content = candidate.content;
-          const parts = (content as { parts?: unknown })?.parts;
+          const candidate = candidates[0] as { content?: unknown; finishReason?: unknown } | undefined;
+          if (typeof candidate?.finishReason === 'string') finishReason = candidate.finishReason;
+          const parts = (candidate?.content as { parts?: unknown } | undefined)?.parts;
           if (!Array.isArray(parts)) continue;
-          for (const part of parts) if (part && typeof (part as { text?: unknown }).text === 'string') yield (part as { text: string }).text;
-        } catch { /* Ignore malformed provider events. */ }
+          for (const part of parts) {
+            if (part && typeof (part as { text?: unknown }).text === 'string') text += (part as { text: string }).text;
+          }
+        } catch {
+          // Ignore malformed provider events; the final finish reason decides success.
+        }
       }
-      if (/length|max_tokens|max_output_tokens|token_limit/i.test(finishReason)) {
-        throw new ProviderError(attempt.provider, 499, `Provider output was truncated (${finishReason}).`);
+    } else {
+      const url = attempt.provider === 'groq'
+        ? 'https://api.groq.com/openai/v1/chat/completions'
+        : 'https://openrouter.ai/api/v1/chat/completions';
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${attempt.key.value}`,
+        'Content-Type': 'application/json',
+      };
+      if (attempt.provider === 'openrouter') {
+        headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
+        headers['X-Title'] = 'Nexa Code AI';
       }
-      return;
+      const maxTokens = outputTokens(Boolean(attempt.isChat));
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: attempt.model,
+          messages: messages.map(message => ({ role: message.role, content: message.content })),
+          stream: true,
+          temperature: 0.2,
+          ...(attempt.provider === 'groq' ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens }),
+        }),
+        signal: controller.signal,
+      });
+      await assertOk(response, attempt.provider);
+      if (!response.body) throw new ProviderError(attempt.provider, 500, 'Streaming response was empty.');
+      for await (const payload of readSSE(response.body)) {
+        if (payload === '[DONE]') continue;
+        try {
+          const json: unknown = JSON.parse(payload);
+          const choices = (json as { choices?: unknown })?.choices;
+          if (!Array.isArray(choices)) continue;
+          const choice = choices[0] as { delta?: unknown; finish_reason?: unknown } | undefined;
+          if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason;
+          const content = (choice?.delta as { content?: unknown } | undefined)?.content;
+          if (typeof content === 'string' && content) text += content;
+        } catch {
+          // Ignore malformed provider events.
+        }
+      }
     }
 
-    const url = attempt.provider === 'groq'
-      ? 'https://api.groq.com/openai/v1/chat/completions'
-      : 'https://openrouter.ai/api/v1/chat/completions';
-    const headers: Record<string, string> = { Authorization: `Bearer ${attempt.key.value}`, 'Content-Type': 'application/json' };
-    if (attempt.provider === 'openrouter') {
-      headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
-      headers['X-Title'] = 'Nexa Code AI';
-    }
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: attempt.model,
-        messages: attempt.messages.map(message => ({ role: message.role, content: message.content })),
-        stream: true,
-        temperature: 0.2,
-        max_tokens: attempt.outputTokens,
-        max_completion_tokens: attempt.outputTokens,
-      }),
-      signal: controller.signal,
-    });
-    await assertOk(response, attempt.provider);
-    if (!response.body) throw new ProviderError(attempt.provider, 500, 'Streaming response was empty.');
-    let finishReason = '';
-    for await (const payload of readSSE(response.body, resetTimeout)) {
-      if (payload === '[DONE]') continue;
-      try {
-        const json: unknown = JSON.parse(payload);
-        const choices = (json as { choices?: unknown })?.choices;
-        if (!Array.isArray(choices)) continue;
-        const choice = choices[0] as { delta?: unknown; finish_reason?: unknown };
-        if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason;
-        const delta = choice.delta;
-        const content = (delta as { content?: unknown })?.content;
-        if (typeof content === 'string' && content) yield content;
-      } catch { /* Ignore malformed provider events. */ }
-    }
-    if (/length|max_tokens|max_output_tokens|token_limit/i.test(finishReason)) {
-      throw new ProviderError(attempt.provider, 499, `Provider output was truncated (${finishReason}).`);
-    }
+    if (!text.trim()) throw new ProviderError(attempt.provider, 502, 'Provider returned an empty response.');
+    return { text, finishReason, truncated: finishReasonIsTruncated(attempt.provider, finishReason) };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function isModelUnavailableError(error: unknown): boolean {
-  if (!(error instanceof ProviderError)) return false;
-  if (error.status === 404) return /model|endpoint|not found|no endpoints|unsupported/i.test(error.message);
-  return /model[_ -]?not[_ -]?found|no endpoints found|model .* not found|unsupported.*model/i.test(error.message);
+function continuationMessages(base: AIMessage[], partial: string, isChat: boolean): AIMessage[] {
+  const safePartial = partial.length > MAX_CONTINUATION_CONTEXT_CHARS
+    ? partial.slice(-MAX_CONTINUATION_CONTEXT_CHARS)
+    : partial;
+  return [
+    ...base,
+    { role: 'assistant', content: safePartial },
+    {
+      role: 'user',
+      content: isChat
+        ? 'Your response was cut off by the output limit. Continue the answer from exactly where you stopped. Do not restart or repeat the completed text. Finish the answer now.'
+        : 'Your code generation was cut off by the output limit. Continue from exactly where you stopped. Do not restart, summarize, or repeat completed files. Finish the current file first, then output every remaining required file using the exact ---FILE: path--- format. Output only file blocks.',
+    },
+  ];
 }
 
-function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === 429 || /quota|rate.?limit|too many requests/i.test(error.message);
-  return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
+async function runAttempt(attempt: Attempt): Promise<{ text: string; continuationCount: number }> {
+  let messages = attempt.messages;
+  let combined = '';
+  const maxContinuations = attempt.isChat ? MAX_CONTINUATIONS_CHAT : MAX_CONTINUATIONS_GENERATION;
+
+  for (let continuation = 0; continuation <= maxContinuations; continuation += 1) {
+    const result = await callProviderStream(attempt, messages);
+    combined += result.text;
+
+    if (!result.truncated) {
+      return { text: combined, continuationCount: continuation };
+    }
+
+    if (continuation >= maxContinuations) {
+      throw new ProviderError(attempt.provider, 499, 'Provider output was truncated (length) after continuation attempts.');
+    }
+
+    messages = continuationMessages(attempt.messages, combined, Boolean(attempt.isChat));
+  }
+
+  throw new ProviderError(attempt.provider, 499, 'Provider output could not be completed.');
+}
+
+function makeTrace(provider: Provider): ProviderTrace {
+  return { provider, keysTried: 0, modelsTried: [], lastError: '', failureKinds: [] };
+}
+
+function traceHasOnlyExhaustionFailures(trace: ProviderTrace) {
+  return trace.failureKinds.length > 0 && trace.failureKinds.every(isKeyExhaustionKind);
 }
 
 export function createStreamingFailover({
@@ -193,78 +318,105 @@ export function createStreamingFailover({
   messages,
   systemPrompt,
   isChat = false,
-  outputTokens,
 }: {
   requestedProvider?: Provider;
   keysByProvider: Record<string, FailoverKey[]>;
   messages: AIMessage[];
   systemPrompt?: string;
   isChat?: boolean;
-  outputTokens?: number;
 }): ReadableStream<string> {
-  const order: Provider[] = isChat
+  const fallback: Provider[] = isChat
     ? ['groq', 'gemini', 'openrouter']
     : ['gemini', 'groq', 'openrouter'];
+  const order = [requestedProvider, ...fallback].filter((value, index, array): value is Provider => array.indexOf(value) === index);
 
   return new ReadableStream<string>({
     async start(controller) {
-      const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
-      let lastErr = 'Unknown provider error';
-      const unavailableModels: Record<Provider, Set<string>> = { gemini: new Set(), groq: new Set(), openrouter: new Set() };
+      const tried: ProviderTrace[] = [];
+      let lastErr = 'No provider returned a complete response.';
+      let allFailuresAreKeyExhaustion = true;
 
-      for (const provider of order) {
-        if ((cooldownUntil[provider] ?? 0) > Date.now()) {
-          tried.push({ provider, keysTried: 0, modelsTried: [], lastError: 'Provider cooldown active' });
-          lastErr = 'Provider cooldown active';
-          continue;
-        }
-        const keys = keysByProvider[provider] ?? [];
-        const models = modelsFor(provider);
-        const providerTried = { provider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
-
-        for (const key of keys) {
-          providerTried.keysTried += 1;
-          for (const model of models) {
-            if (unavailableModels[provider].has(model)) continue;
-            providerTried.modelsTried.push(model);
-            const attempt: Attempt = { provider, key, model, messages, systemPrompt, outputTokens: outputTokens ?? (isChat ? 3072 : 16384) };
-            try {
-              console.log(`[STREAM TRY] ${provider} ${model} key=${key.id.slice(0, 6)}`);
-              const buffered: string[] = [];
-              const providerStream = callProviderStream(attempt);
-              for await (const chunk of providerStream) buffered.push(chunk);
-              for (const chunk of buffered) controller.enqueue(chunk);
-              controller.close();
-              console.log(`[STREAM SUCCESS] ${provider} ${model}`);
-              return;
-            } catch (error) {
-              lastErr = error instanceof Error ? error.message : String(error);
-              providerTried.lastError = lastErr;
-              console.error(`[STREAM FAIL] ${provider} ${model}: ${lastErr}`);
-              if (isModelUnavailableError(error)) {
-                // A 404/model_not_found/no-endpoint is a model configuration problem,
-                // not a bad API key. Do not retry the same dead model with every key.
-                unavailableModels[provider].add(model);
-                controller.enqueue(`${SWITCH_PREFIX}${provider}`);
-                continue;
-              }
-              if (isCooldownError(error)) {
-                startCooldown(provider);
-                controller.enqueue(`${SWITCH_PREFIX}${provider}`);
-                // A provider-level quota/network failure should immediately move
-                // to the next provider instead of burning through every key/model.
-                break;
-              }
-              controller.enqueue(`${SWITCH_PREFIX}${provider}`);
-            }
+      try {
+        for (const provider of order) {
+          if (isCoolingDown(provider)) {
+            const trace = makeTrace(provider);
+            trace.lastError = 'Provider cooldown active';
+            trace.failureKinds.push('busy');
+            tried.push(trace);
+            allFailuresAreKeyExhaustion = false;
+            continue;
           }
-          if ((cooldownUntil[provider] ?? 0) > Date.now()) break;
-        }
-        tried.push(providerTried);
-      }
 
-      const payload = JSON.stringify(tried);
-      controller.error(new Error(`KEYS_EXHAUSTED::${payload}::${lastErr}`));
+          const keys = keysByProvider[provider] ?? [];
+          if (!keys.length) continue;
+          const trace = makeTrace(provider);
+
+          for (const key of keys) {
+            trace.keysTried += 1;
+            let keyHadSuccess = false;
+
+            for (const model of modelsFor(provider)) {
+              trace.modelsTried.push(model);
+              const attempt: Attempt = { provider, key, model, messages, systemPrompt, isChat };
+              try {
+                console.log(`[STREAM TRY] ${provider} ${model} key=${String(key.id).slice(0, 6)} mode=${isChat ? 'chat' : 'generation'}`);
+                const result = await runAttempt(attempt);
+                keyHadSuccess = true;
+                console.log(`[STREAM SUCCESS] ${provider} ${model} output=${result.text.length} continuations=${result.continuationCount}`);
+                // A provider attempt is buffered until it completes, so a failed or
+                // truncated attempt can never be mixed with another provider's output.
+                for (let offset = 0; offset < result.text.length; offset += 4096) {
+                  controller.enqueue(result.text.slice(offset, offset + 4096));
+                }
+                controller.close();
+                return;
+              } catch (error) {
+                const failure = classifyFailure(error);
+                lastErr = failure.message;
+                trace.lastError = formatFailure(failure);
+                trace.failureKinds.push(failure.kind);
+                console.error(`[STREAM FAIL] ${provider} ${model}: ${trace.lastError}`);
+
+                if (failure.kind === 'truncated') {
+                  // Output-limit failures are model/generation failures, not dead keys.
+                  allFailuresAreKeyExhaustion = false;
+                  continue;
+                }
+                if (failure.kind === 'model') {
+                  allFailuresAreKeyExhaustion = false;
+                  continue;
+                }
+                if (failure.kind === 'auth' || failure.kind === 'quota') {
+                  // Auth/quota is key-scoped. Stop trying models on this key and move
+                  // immediately to the next saved key.
+                  break;
+                }
+                if (isProviderCooldownKind(failure.kind)) {
+                  allFailuresAreKeyExhaustion = false;
+                  startCooldown(provider);
+                  controller.enqueue(`${SWITCH_PREFIX}${provider}`);
+                  break;
+                }
+                allFailuresAreKeyExhaustion = false;
+              }
+            }
+
+            if (isCoolingDown(provider)) break;
+            if (keyHadSuccess) break;
+          }
+
+          if (trace.failureKinds.length) {
+            if (!traceHasOnlyExhaustionFailures(trace)) allFailuresAreKeyExhaustion = false;
+            tried.push(trace);
+          }
+        }
+
+        const payload = JSON.stringify(tried);
+        const code = allFailuresAreKeyExhaustion ? 'KEYS_EXHAUSTED' : 'AI_UNAVAILABLE';
+        controller.error(new Error(`${code}::${payload}::${lastErr}`));
+      } catch (error) {
+        controller.error(error);
+      }
     },
   });
 }
@@ -275,18 +427,16 @@ export async function streamWithFailover({
   keys,
   keysByProvider,
   onChunk,
-  outputTokens,
 }: {
   provider: Provider;
   messages: AIMessage[];
   keys: string[];
   keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
-  outputTokens?: number;
 }): Promise<void> {
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = keys.slice(0, 3).map((value, index) => ({ id: `${provider}-${index + 1}`, value }));
-  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, outputTokens });
+  const stream = createStreamingFailover({ requestedProvider: provider, keysByProvider: allKeys, messages, isChat: false });
   const reader = stream.getReader();
   try {
     while (true) {
@@ -300,8 +450,21 @@ export async function streamWithFailover({
   }
 }
 
+export function parseFailoverError(message: string) {
+  const match = /^(KEYS_EXHAUSTED|AI_UNAVAILABLE)::([\s\S]*?)::([\s\S]*)$/.exec(message);
+  if (!match) return null;
+  let tried: unknown[] = [];
+  try { tried = JSON.parse(match[2]); } catch { /* Keep fallback. */ }
+  return { code: match[1] as 'KEYS_EXHAUSTED' | 'AI_UNAVAILABLE', tried, message: match[3] || 'All providers failed.' };
+}
+
 export function friendlyFailoverError(messageOrProvider: string | Provider): string {
-  return messageOrProvider.startsWith('KEYS_EXHAUSTED::')
-    ? 'All configured AI keys are currently exhausted or unavailable. Please wait for cooldown or add a key in Settings.'
-    : `Nexa couldn't connect with any of your ${messageOrProvider} keys. Check the saved keys, usage limits, and provider status, then try again.`;
+  const parsed = parseFailoverError(messageOrProvider);
+  if (parsed?.code === 'KEYS_EXHAUSTED') {
+    return 'All configured AI keys are currently rate-limited or invalid. Wait for cooldown or add another key in Settings.';
+  }
+  if (parsed?.code === 'AI_UNAVAILABLE') {
+    return `AI providers could not complete this request right now. Last error: ${parsed.message}`;
+  }
+  return `Nexa couldn't complete the request with ${messageOrProvider}. Check provider status, usage limits, and saved keys, then try again.`;
 }

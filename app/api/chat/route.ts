@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { decryptApiKey } from '@/lib/ai/crypto';
-import { createStreamingFailover, friendlyFailoverError, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
+import { createStreamingFailover, friendlyFailoverError, parseFailoverError, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
 export const runtime = 'nodejs';
 
-const SYSTEM = `You are Nexa Code AI in Conversation Mode. You MUST ask clarifying questions about project requirements, tech stack, features, design before proposing. Do NOT write code yet. Goal is to understand fully. When you have enough info, output [PROPOSAL_READY] marker.`;
+const SYSTEM = `You are Nexa Code AI in Conversation Mode. Understand the user's request and help them reach a build-ready specification. Do not ask unnecessary clarifying questions. If the request is detailed enough, make sensible defaults yourself and proceed immediately. Do not write the implementation yet. When the requirements are sufficiently clear, output [PROPOSAL_READY]. Never stall a detailed request with a questionnaire.`;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -71,20 +71,23 @@ export async function POST(request: Request) {
   if (saveUserError) return NextResponse.json({ error: saveUserError.message }, { status: 500 });
 
   const encoder = new TextEncoder();
-  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: SYSTEM, isChat: true, outputTokens: 3072 });
+  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: SYSTEM, isChat: true });
   const reader = failoverStream.getReader();
   let first: ReadableStreamReadResult<string>;
   try {
     first = await reader.read();
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
-    if (raw.startsWith('KEYS_EXHAUSTED::')) {
-      const [, triedJson = '[]', lastErr = 'All providers failed'] = raw.split('::');
-      let tried: unknown[] = [];
-      try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
+    const parsed = parseFailoverError(raw);
+    if (parsed?.code === 'KEYS_EXHAUSTED') {
       console.error('[NEXA KEYS_EXHAUSTED]', error);
       reader.releaseLock();
-      return Response.json({ error: 'KEYS_EXHAUSTED', tried, message: lastErr, retryAfter: 60 }, { status: 429 });
+      return Response.json({ error: 'KEYS_EXHAUSTED', tried: parsed.tried, message: parsed.message, retryAfter: 60 }, { status: 429 });
+    }
+    if (parsed?.code === 'AI_UNAVAILABLE') {
+      console.error('[NEXA AI_UNAVAILABLE]', error);
+      reader.releaseLock();
+      return Response.json({ error: 'AI_UNAVAILABLE', tried: parsed.tried, message: parsed.message, retryAfter: 30 }, { status: 503 });
     }
     console.error('[NEXA CHAT ERROR]', error);
     reader.releaseLock();
@@ -113,12 +116,13 @@ export async function POST(request: Request) {
         send({ type: 'done', proposalReady: full.includes('[PROPOSAL_READY]') });
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
-        if (raw.startsWith('KEYS_EXHAUSTED::')) {
-          const [, triedJson = '[]', lastErr = 'All providers failed'] = raw.split('::');
-          let tried: unknown[] = [];
-          try { tried = JSON.parse(triedJson); } catch { /* Keep UI-safe fallback. */ }
+        const parsed = parseFailoverError(raw);
+        if (parsed?.code === 'KEYS_EXHAUSTED') {
           console.error('[NEXA KEYS_EXHAUSTED]', error);
-          send({ type: 'keys_exhausted', error: 'KEYS_EXHAUSTED', tried, message: lastErr, retryAfter: 60 });
+          send({ type: 'keys_exhausted', error: 'KEYS_EXHAUSTED', tried: parsed.tried, message: parsed.message, retryAfter: 60 });
+        } else if (parsed?.code === 'AI_UNAVAILABLE') {
+          console.error('[NEXA AI_UNAVAILABLE]', error);
+          send({ type: 'provider_error', error: 'AI_UNAVAILABLE', tried: parsed.tried, message: parsed.message, retryAfter: 30 });
         } else {
           console.error('[NEXA CHAT ERROR]', error);
           send({ type: 'error', message: friendlyFailoverError(raw) });
