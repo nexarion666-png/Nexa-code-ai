@@ -149,16 +149,12 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       return;
     }
 
-    const url = attempt.provider === 'codecraft'
-      ? 'https://codecraftapi.com/v1/chat/completions'
-      : attempt.provider === 'groq'
-        ? 'https://api.groq.com/openai/v1/chat/completions'
+    const url = attempt.provider === 'groq'
+      ? 'https://api.groq.com/openai/v1/chat/completions'
+      : attempt.provider === 'codecraft'
+        ? 'https://codecraftapi.com/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';
     const headers: Record<string, string> = { Authorization: `Bearer ${attempt.key.value}`, 'Content-Type': 'application/json' };
-    if (attempt.provider === 'codecraft') {
-      // CodeCraft exposes an OpenAI-compatible chat-completions endpoint.
-      // Keep its key private on the server and route all requests through this adapter.
-    }
     if (attempt.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
@@ -256,7 +252,7 @@ async function continueGeneration(attempt: Attempt, partial: string): Promise<st
 }
 
 export function createStreamingFailover({
-  requestedProvider = 'gemini',
+  requestedProvider = 'codecraft',
   keysByProvider,
   messages,
   systemPrompt,
