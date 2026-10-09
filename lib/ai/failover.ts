@@ -8,10 +8,23 @@ export const MODELS: Record<Provider, readonly string[]> = {
 };
 
 const CHAT_OUTPUT_TOKENS = 4096;
-const GENERATION_OUTPUT_TOKENS = 32768;
+// Keep output budgets inside realistic provider limits. Large projects should be
+// generated in bounded responses and continued only when the provider can afford it.
+const GEMINI_GENERATION_OUTPUT_TOKENS = 12288;
+const GROQ_GENERATION_OUTPUT_TOKENS = 2048;
+const OPENROUTER_GENERATION_OUTPUT_TOKENS = 4096;
+const REPAIR_OUTPUT_TOKENS = 2048;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
-const MAX_CONTINUATIONS = 3;
+const MAX_CONTINUATIONS = 2;
+
+function outputTokenBudget(provider: Provider, mode: 'chat' | 'generation' | 'repair'): number {
+  if (mode === 'chat') return CHAT_OUTPUT_TOKENS;
+  if (mode === 'repair') return REPAIR_OUTPUT_TOKENS;
+  if (provider === 'gemini') return GEMINI_GENERATION_OUTPUT_TOKENS;
+  if (provider === 'groq') return GROQ_GENERATION_OUTPUT_TOKENS;
+  return OPENROUTER_GENERATION_OUTPUT_TOKENS;
+}
 
 export class ProviderError extends Error {
   constructor(public provider: Provider, public status: number, message: string, public code?: string, public partialOutput = '') {
@@ -124,7 +137,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
           body: JSON.stringify({
             ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
             contents,
-            generationConfig: { temperature: 0.2, maxOutputTokens: (mode === 'generation' || mode === 'repair') ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS },
+            generationConfig: { temperature: 0.2, maxOutputTokens: outputTokenBudget(attempt.provider, mode) },
           }),
           signal: controller.signal,
         },
@@ -167,7 +180,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
-    const outputTokens = (mode === 'generation' || mode === 'repair') ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
+    const outputTokens = outputTokenBudget(attempt.provider, mode);
     const response = await fetch(url, {
       method: 'POST',
       headers,
@@ -214,8 +227,39 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
   }
 }
 
+function isOversizedTpmError(error: unknown): boolean {
+  return error instanceof ProviderError &&
+    /tokens per minute|\bTPM\b/i.test(error.message) &&
+    /Requested\s+\d+.*Limit\s+\d+/is.test(error.message);
+}
+
+function isModelTransientError(error: unknown): boolean {
+  return error instanceof ProviderError &&
+    (error.status === 503 || /high demand|temporarily unavailable|service unavailable/i.test(error.message));
+}
+
+function cooldownSecondsFor(error: unknown): number {
+  if (!(error instanceof ProviderError)) return 60;
+  // Respect explicit provider retry windows, including Gemini's long quota reset.
+  const retry = error.message.match(/retry in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?/i);
+  if (retry && (retry[1] || retry[2] || retry[3])) {
+    const seconds = Number(retry[1] ?? 0) * 3600 + Number(retry[2] ?? 0) * 60 + Number(retry[3] ?? 0);
+    if (seconds > 0) return Math.min(seconds, 24 * 3600);
+  }
+  if (error.status === 408) return 20;
+  if (error.status === 402) return 30 * 60;
+  if (error.status === 429) return 15 * 60;
+  return 60;
+}
+
 function isCooldownError(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === 429 || error.status === 408 || error.status === 402 || /quota|rate.?limit|too many requests|temporarily unavailable|high demand|in[_ -]?flight[_ -]?budget|available credits/i.test(error.message);
+  if (error instanceof ProviderError) {
+    // A 503/high-demand response is model-specific: try the next model on this key.
+    if (isModelTransientError(error)) return false;
+    if (isOversizedTpmError(error)) return false;
+    return error.status === 429 || error.status === 408 || error.status === 402 ||
+      /quota|rate.?limit|too many requests|in[_ -]?flight[_ -]?budget|available credits|insufficient credits/i.test(error.message);
+  }
   return error instanceof Error && (error.name === 'AbortError' || /network|fetch failed|timed out|timeout|socket|ECONN/i.test(error.message));
 }
 
@@ -292,6 +336,7 @@ export function createStreamingFailover({
         const models = modelsFor(provider);
         const providerTried = { provider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
         if (!keys.length) continue;
+        let skipProvider = false;
 
         for (const key of keys) {
           if (isCoolingDown(provider, key)) {
@@ -314,8 +359,14 @@ export function createStreamingFailover({
               providerTried.lastError = lastErr;
               console.error(`[STREAM FAIL] ${provider} ${model}: ${lastErr}`);
               controller.enqueue(`${SWITCH_PREFIX}${provider}`);
+              if (isOversizedTpmError(error)) {
+                providerTried.lastError = 'Request exceeds this provider\'s token-per-minute budget; skipping the provider instead of retrying the same oversized prompt.';
+                skipProvider = true;
+                break;
+              }
+              if (isModelTransientError(error)) continue;
               if (isCooldownError(error)) {
-                const seconds = error instanceof ProviderError && error.status === 408 ? 20 : error instanceof ProviderError && error.status === 402 ? 120 : 60;
+                const seconds = cooldownSecondsFor(error);
                 startCooldown(provider, seconds, key);
                 break;
               }
@@ -324,6 +375,7 @@ export function createStreamingFailover({
               if (error instanceof ProviderError && error.code === 'TRUNCATED_OUTPUT') continue;
             }
           }
+          if (skipProvider) break;
         }
         tried.push(providerTried);
       }
@@ -364,6 +416,14 @@ export async function streamWithFailover({
     if ((cooldownUntil[currentProvider] ?? 0) > Date.now()) continue;
     const models = modelsFor(currentProvider);
     const info = { provider: currentProvider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
+    const promptChars = messages.reduce((total, message) => total + message.content.length, 0);
+    if (mode === 'generation' && currentProvider === 'groq' && promptChars > 14000) {
+      info.lastError = `Generation prompt is ${promptChars} characters; skipped Groq because its 8,000 TPM tier cannot safely fit this prompt plus output.`;
+      tried.push(info);
+      console.warn(`[STREAM SKIP] groq: ${info.lastError}`);
+      continue;
+    }
+    let skipCurrentProvider = false;
 
     for (const key of providerKeys) {
       if (isCoolingDown(currentProvider, key)) {
@@ -392,14 +452,21 @@ export async function streamWithFailover({
           lastError = error instanceof Error ? error.message : String(error);
           info.lastError = lastError;
           console.error(`[STREAM FAIL] ${currentProvider} ${model}: ${lastError}`);
+          if (isOversizedTpmError(error)) {
+            info.lastError = 'Request exceeds this provider\'s token-per-minute budget; skipping the provider instead of retrying the same oversized prompt.';
+            skipCurrentProvider = true;
+            break;
+          }
+          if (isModelTransientError(error)) continue;
           if (isCooldownError(error)) {
-            const seconds = error instanceof ProviderError && error.status === 408 ? 20 : error instanceof ProviderError && error.status === 402 ? 120 : 60;
+            const seconds = cooldownSecondsFor(error);
             startCooldown(currentProvider, seconds, key);
             break;
           }
           if (isDeadKeyError(error)) break;
         }
-      }
+        }
+      if (skipCurrentProvider) break;
     }
     tried.push(info);
   }
