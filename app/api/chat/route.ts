@@ -27,14 +27,14 @@ export async function POST(request: Request) {
 
   const { data: keyRows, error: keyError } = await supabase.from('user_api_keys').select('provider,key_name,api_key').eq('user_id', user.id).order('key_name');
   if (keyError) return NextResponse.json({ error: keyError.message }, { status: 500 });
-  const keysByProvider: Record<Provider, FailoverKey[]> = { gemini: [], groq: [], openrouter: [] };
+  const keysByProvider: Record<Provider, FailoverKey[]> = { codecraft: [], gemini: [], groq: [], openrouter: [] };
   for (const row of keyRows ?? []) {
     if (!(row.provider in keysByProvider)) continue;
     try { keysByProvider[row.provider as Provider].push({ id: String(row.key_name || `key-${keysByProvider[row.provider as Provider].length + 1}`), value: decryptApiKey(row.api_key) }); } catch { /* Ignore an invalid old key. */ }
   }
-  const requestedProvider = String(body.provider || 'gemini') as Provider;
-  const provider: Provider = ['gemini', 'groq', 'openrouter'].includes(requestedProvider) && keysByProvider[requestedProvider].length ? requestedProvider : (['gemini', 'groq', 'openrouter'] as Provider[]).find(p => keysByProvider[p].length > 0) ?? requestedProvider;
-  if (!['gemini', 'groq', 'openrouter'].includes(provider)) return NextResponse.json({ error: 'Unsupported provider.' }, { status: 400 });
+  const requestedProvider = String(body.provider || 'codecraft') as Provider;
+  const provider: Provider = ['codecraft', 'gemini', 'groq', 'openrouter'].includes(requestedProvider) && keysByProvider[requestedProvider].length ? requestedProvider : (['codecraft', 'gemini', 'groq', 'openrouter'] as Provider[]).find(p => keysByProvider[p].length > 0) ?? requestedProvider;
+  if (!['codecraft', 'gemini', 'groq', 'openrouter'].includes(provider)) return NextResponse.json({ error: 'Unsupported provider.' }, { status: 400 });
   if (!keysByProvider[provider].length) return NextResponse.json({ error: 'No AI provider keys are configured. Open AI Settings and add a key.' }, { status: 400 });
 
   // Keep chat requests below low provider TPM limits. Groq's on-demand tier can

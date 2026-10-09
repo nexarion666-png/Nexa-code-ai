@@ -21,7 +21,7 @@ create index if not exists projects_user_id_created_at_idx on public.projects(us
 create table if not exists public.user_api_keys (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  provider text not null check (provider in ('gemini','groq','openrouter')),
+  provider text not null check (provider in ('codecraft','gemini','groq','openrouter')),
   key_name text not null check (key_name in ('Key 1','Key 2','Key 3')),
   api_key text not null,
   created_at timestamptz not null default now(),

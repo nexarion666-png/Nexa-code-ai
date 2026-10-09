@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { encryptApiKey } from '@/lib/ai/crypto';
 
-const providers = ['gemini', 'groq', 'openrouter'] as const;
+const providers = ['codecraft', 'gemini', 'groq', 'openrouter'] as const;
 
 export async function GET() {
   const supabase = await createClient();

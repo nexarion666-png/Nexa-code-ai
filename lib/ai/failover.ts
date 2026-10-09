@@ -1,7 +1,9 @@
-export type Provider = 'gemini' | 'groq' | 'openrouter';
+export type Provider = 'codecraft' | 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
+  // CodeCraft is the primary provider. Keep the list to models shown in the user's catalogue.
+  codecraft: ['deepseek-v4-flash-0731', 'gemma-2-2b'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
   openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
@@ -13,6 +15,7 @@ const CHAT_OUTPUT_TOKENS = 4096;
 const GEMINI_GENERATION_OUTPUT_TOKENS = 12288;
 const GROQ_GENERATION_OUTPUT_TOKENS = 2048;
 const OPENROUTER_GENERATION_OUTPUT_TOKENS = 4096;
+const CODECRAFT_GENERATION_OUTPUT_TOKENS = 8192;
 const REPAIR_OUTPUT_TOKENS = 2048;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
@@ -23,6 +26,7 @@ function outputTokenBudget(provider: Provider, mode: 'chat' | 'generation' | 're
   if (mode === 'repair') return REPAIR_OUTPUT_TOKENS;
   if (provider === 'gemini') return GEMINI_GENERATION_OUTPUT_TOKENS;
   if (provider === 'groq') return GROQ_GENERATION_OUTPUT_TOKENS;
+  if (provider === 'codecraft') return CODECRAFT_GENERATION_OUTPUT_TOKENS;
   return OPENROUTER_GENERATION_OUTPUT_TOKENS;
 }
 
@@ -59,6 +63,7 @@ export type CooldownStatus = Record<Provider, { cooldownUntil: number; cooldownS
 export function getCooldownStatus(): CooldownStatus {
   const now = Date.now();
   return {
+    codecraft: { cooldownUntil: cooldownUntil.codecraft ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.codecraft ?? 0) - now) / 1000)) },
     gemini: { cooldownUntil: cooldownUntil.gemini ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.gemini ?? 0) - now) / 1000)) },
     groq: { cooldownUntil: cooldownUntil.groq ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.groq ?? 0) - now) / 1000)) },
     openrouter: { cooldownUntil: cooldownUntil.openrouter ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.openrouter ?? 0) - now) / 1000)) },
@@ -172,9 +177,11 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       return;
     }
 
-    const url = attempt.provider === 'groq'
-      ? 'https://api.groq.com/openai/v1/chat/completions'
-      : 'https://openrouter.ai/api/v1/chat/completions';
+    const url = attempt.provider === 'codecraft'
+      ? 'https://codecraftapi.com/v1/chat/completions'
+      : attempt.provider === 'groq'
+        ? 'https://api.groq.com/openai/v1/chat/completions'
+        : 'https://openrouter.ai/api/v1/chat/completions';
     const headers: Record<string, string> = { Authorization: `Bearer ${attempt.key.value}`, 'Content-Type': 'application/json' };
     if (attempt.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
@@ -317,8 +324,8 @@ export function createStreamingFailover({
   isChat?: boolean;
 }): ReadableStream<string> {
   const order: Provider[] = isChat
-    ? [requestedProvider, 'groq', 'gemini', 'openrouter']
-    : [requestedProvider, 'gemini', 'groq', 'openrouter'];
+    ? [requestedProvider, 'codecraft', 'groq', 'gemini', 'openrouter']
+    : [requestedProvider, 'codecraft', 'gemini', 'groq', 'openrouter'];
   const uniqueOrder = order.filter((provider, index) => order.indexOf(provider) === index);
 
   return new ReadableStream<string>({
@@ -402,11 +409,11 @@ export async function streamWithFailover({
   mode?: 'chat' | 'generation' | 'repair';
 }): Promise<void> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
-  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
+  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { codecraft: [], gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = normalize(keys);
   if (!allKeys[provider]?.length) throw new Error('AI_UNAVAILABLE::[]::No configured key for requested provider');
 
-  const orderedProviders: Provider[] = [provider, 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
+  const orderedProviders: Provider[] = [provider, 'codecraft', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
   let lastError = 'All providers failed';
   const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
 

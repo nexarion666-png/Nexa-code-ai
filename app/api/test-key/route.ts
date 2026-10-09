@@ -11,7 +11,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
   const provider = String(body.provider ?? '') as Provider;
   const apiKey = String(body.apiKey ?? '').trim();
-  if (!['gemini', 'groq', 'openrouter'].includes(provider) || !apiKey) return NextResponse.json({ error: 'Provider and API key are required.' }, { status: 400 });
+  if (!['codecraft', 'gemini', 'groq', 'openrouter'].includes(provider) || !apiKey) return NextResponse.json({ error: 'Provider and API key are required.' }, { status: 400 });
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

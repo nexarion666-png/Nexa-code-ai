@@ -2,7 +2,7 @@ import { decryptApiKey } from '@/lib/ai/crypto';
 import type { Provider } from '@/lib/ai/failover';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-export const PROVIDERS: Provider[] = ['gemini', 'groq', 'openrouter'];
+export const PROVIDERS: Provider[] = ['codecraft', 'gemini', 'groq', 'openrouter'];
 
 export async function loadUserProviderKeys(supabase: SupabaseClient, userId: string) {
   const { data, error } = await supabase
@@ -14,7 +14,7 @@ export async function loadUserProviderKeys(supabase: SupabaseClient, userId: str
 
   if (error) throw new Error(error.message);
 
-  const keysByProvider: Record<Provider, string[]> = { gemini: [], groq: [], openrouter: [] };
+  const keysByProvider: Record<Provider, string[]> = { codecraft: [], gemini: [], groq: [], openrouter: [] };
   for (const row of data ?? []) {
     const provider = row.provider as Provider;
     if (!PROVIDERS.includes(provider)) continue;
