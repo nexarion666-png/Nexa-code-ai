@@ -1,7 +1,8 @@
-export type Provider = 'gemini' | 'groq' | 'openrouter';
+export type Provider = 'codecraft' | 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
+  codecraft: ['deepseek-v4-flash-0731', 'gemma-2-2b'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
   openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
@@ -39,6 +40,7 @@ export type CooldownStatus = Record<Provider, { cooldownUntil: number; cooldownS
 export function getCooldownStatus(): CooldownStatus {
   const now = Date.now();
   return {
+    codecraft: { cooldownUntil: cooldownUntil.codecraft ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.codecraft ?? 0) - now) / 1000)) },
     gemini: { cooldownUntil: cooldownUntil.gemini ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.gemini ?? 0) - now) / 1000)) },
     groq: { cooldownUntil: cooldownUntil.groq ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.groq ?? 0) - now) / 1000)) },
     openrouter: { cooldownUntil: cooldownUntil.openrouter ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.openrouter ?? 0) - now) / 1000)) },
@@ -149,7 +151,9 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
 
     const url = attempt.provider === 'groq'
       ? 'https://api.groq.com/openai/v1/chat/completions'
-      : 'https://openrouter.ai/api/v1/chat/completions';
+      : attempt.provider === 'codecraft'
+        ? 'https://codecraftapi.com/v1/chat/completions'
+        : 'https://openrouter.ai/api/v1/chat/completions';
     const headers: Record<string, string> = { Authorization: `Bearer ${attempt.key.value}`, 'Content-Type': 'application/json' };
     if (attempt.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
@@ -248,7 +252,7 @@ async function continueGeneration(attempt: Attempt, partial: string): Promise<st
 }
 
 export function createStreamingFailover({
-  requestedProvider = 'gemini',
+  requestedProvider = 'codecraft',
   keysByProvider,
   messages,
   systemPrompt,
@@ -261,8 +265,8 @@ export function createStreamingFailover({
   isChat?: boolean;
 }): ReadableStream<string> {
   const order: Provider[] = isChat
-    ? [requestedProvider, 'groq', 'gemini', 'openrouter']
-    : [requestedProvider, 'gemini', 'groq', 'openrouter'];
+    ? [requestedProvider, 'codecraft', 'groq', 'gemini', 'openrouter']
+    : [requestedProvider, 'codecraft', 'gemini', 'groq', 'openrouter'];
   const uniqueOrder = order.filter((provider, index) => order.indexOf(provider) === index);
 
   return new ReadableStream<string>({
