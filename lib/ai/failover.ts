@@ -100,9 +100,9 @@ function isTruncationReason(value: unknown): boolean {
   return typeof value === 'string' && /^(length|max_tokens|max_tokens_exceeded|MAX_TOKENS)$/i.test(value);
 }
 
-async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' = 'chat'): AsyncGenerator<string> {
+async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' | 'repair' = 'chat'): AsyncGenerator<string> {
   const controller = new AbortController();
-  const timeoutMs = mode === 'generation' ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
+  const timeoutMs = (mode === 'generation' || mode === 'repair') ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
   let timeout = setTimeout(() => controller.abort(), timeoutMs);
   const resetTimeout = () => {
     clearTimeout(timeout);
@@ -124,7 +124,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
           body: JSON.stringify({
             ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
             contents,
-            generationConfig: { temperature: 0.2, maxOutputTokens: mode === 'generation' ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS },
+            generationConfig: { temperature: 0.2, maxOutputTokens: (mode === 'generation' || mode === 'repair') ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS },
           }),
           signal: controller.signal,
         },
@@ -167,7 +167,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       headers['HTTP-Referer'] = 'https://nexa-code-ai.vercel.app';
       headers['X-Title'] = 'Nexa Code AI';
     }
-    const outputTokens = mode === 'generation' ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
+    const outputTokens = (mode === 'generation' || mode === 'repair') ? GENERATION_OUTPUT_TOKENS : CHAT_OUTPUT_TOKENS;
     const response = await fetch(url, {
       method: 'POST',
       headers,
@@ -228,7 +228,7 @@ function isModelError(error: unknown): boolean {
   return error instanceof ProviderError && error.status === 404;
 }
 
-async function collectAttempt(attempt: Attempt, mode: 'chat' | 'generation'): Promise<string> {
+async function collectAttempt(attempt: Attempt, mode: 'chat' | 'generation' | 'repair'): Promise<string> {
   let output = '';
   for await (const chunk of callProviderStream(attempt, mode)) output += chunk;
   return output;
@@ -347,7 +347,7 @@ export async function streamWithFailover({
   keys: string[] | FailoverKey[];
   keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
-  mode?: 'chat' | 'generation';
+  mode?: 'chat' | 'generation' | 'repair';
 }): Promise<void> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
