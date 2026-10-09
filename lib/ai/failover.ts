@@ -195,7 +195,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
     }
 
     const url = attempt.provider === 'codecraft'
-      ? 'https://codecraftapi.com/v1/chat/completions'
+      ? 'https://www.codecraftapi.com/v1/chat/completions'
       : attempt.provider === 'groq'
         ? 'https://api.groq.com/openai/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';
