@@ -230,7 +230,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
 function isOversizedTpmError(error: unknown): boolean {
   return error instanceof ProviderError &&
     /tokens per minute|\bTPM\b/i.test(error.message) &&
-    /Requested\s+\d+.*Limit\s+\d+/is.test(error.message);
+    /Requested\s+\d+[\s\S]*?Limit\s+\d+/i.test(error.message);
 }
 
 function isModelTransientError(error: unknown): boolean {
