@@ -334,11 +334,11 @@ export async function streamWithFailover({
   mode?: 'chat' | 'generation' | 'repair';
 }): Promise<void> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
-  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { gemini: [], groq: [], openrouter: [] };
+  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { codecraft: [], gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = normalize(keys);
   if (!allKeys[provider]?.length) throw new Error('AI_UNAVAILABLE::[]::No configured key for requested provider');
 
-  const orderedProviders: Provider[] = [provider, 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
+  const orderedProviders: Provider[] = [provider, 'codecraft', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
   let lastError = 'All providers failed';
   const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
 

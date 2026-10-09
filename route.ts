@@ -173,6 +173,7 @@ export async function POST(request: Request) {
   // loadUserProviderKeys returns decrypted string[] values. Normalize them once
   // at the route boundary so the failover engine receives its expected key shape.
   const failoverKeysByProvider: Record<Provider, FailoverKey[]> = {
+    codecraft: (keysByProvider.codecraft ?? []).map((value, index) => ({ id: `codecraft-key-${index + 1}`, value })),
     gemini: (keysByProvider.gemini ?? []).map((value, index) => ({ id: `gemini-key-${index + 1}`, value })),
     groq: (keysByProvider.groq ?? []).map((value, index) => ({ id: `groq-key-${index + 1}`, value })),
     openrouter: (keysByProvider.openrouter ?? []).map((value, index) => ({ id: `openrouter-key-${index + 1}`, value })),
