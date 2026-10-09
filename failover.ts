@@ -169,7 +169,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
     const url = attempt.provider === 'groq'
       ? 'https://api.groq.com/openai/v1/chat/completions'
       : attempt.provider === 'codecraft'
-        ? 'https://www.codecraftapi.com/v1/chat/completions'
+        ? 'https://codecraftapi.com/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';
     const headers: Record<string, string> = { Authorization: `Bearer ${attempt.key.value}`, 'Content-Type': 'application/json' };
     if (attempt.provider === 'openrouter') {

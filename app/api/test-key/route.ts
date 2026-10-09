@@ -18,8 +18,46 @@ export async function POST(request: Request) {
     async start(controller) {
       const send = (payload: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
       try {
-        await streamWithFailover({ provider, messages: [{ role: 'user', content: 'Reply with exactly: Nexa key test successful.' }], keys: [apiKey], onChunk: async chunk => send({ type: 'chunk', text: chunk }) });
-        send({ type: 'done' });
+        if (provider === 'codecraft') {
+          // Settings key test is a direct, non-streaming API check. This isolates
+          // key/endpoint validation from Nexa's normal streaming/failover path.
+          const response = await fetch('https://codecraftapi.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              model: 'deepseek-v4-flash-0731',
+              messages: [{ role: 'user', content: 'Reply with exactly: Nexa key test successful.' }],
+              stream: false,
+              max_tokens: 32,
+              temperature: 0,
+            }),
+            signal: AbortSignal.timeout(15000),
+          });
+          const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+          const responseText = await response.text();
+          if (contentType.includes('text/html') || /<html[\s>]|just a moment|cloudflare|cf-chl|challenge-platform/i.test(responseText.slice(0, 2500))) {
+            send({ type: 'error', message: 'CodeCraft API returned an HTML/Cloudflare challenge instead of JSON. The key has not been validated; confirm the API hostname with CodeCraft support.' });
+          } else {
+            let data: any = null;
+            try { data = JSON.parse(responseText); } catch { /* handled below */ }
+            if (!response.ok) {
+              const detail = data?.error?.message ?? data?.message ?? `HTTP ${response.status}`;
+              send({ type: 'error', message: `CodeCraft API test failed (${response.status}): ${String(detail).slice(0, 400)}` });
+            } else if (typeof data?.choices?.[0]?.message?.content === 'string') {
+              send({ type: 'chunk', text: data.choices[0].message.content });
+              send({ type: 'done' });
+            } else {
+              send({ type: 'error', message: 'CodeCraft returned JSON, but not a recognizable chat-completions response. Check the API compatibility and model name.' });
+            }
+          }
+        } else {
+          await streamWithFailover({ provider, messages: [{ role: 'user', content: 'Reply with exactly: Nexa key test successful.' }], keys: [apiKey], onChunk: async chunk => send({ type: 'chunk', text: chunk }) });
+          send({ type: 'done' });
+        }
       } catch (error) {
         send({ type: 'error', message: error instanceof Error ? error.message : 'Key test failed.' });
       } finally { controller.close(); }
