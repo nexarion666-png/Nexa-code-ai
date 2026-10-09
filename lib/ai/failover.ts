@@ -84,9 +84,26 @@ function modelsFor(provider: Provider): readonly string[] {
 }
 
 async function assertOk(response: Response, provider: Provider): Promise<void> {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  // Some API hostnames can return a Cloudflare HTML challenge instead of an API
+  // response. Never treat that page as an empty successful model response.
+  if (provider === 'codecraft' && contentType.includes('text/html')) {
+    const text = await response.text().catch(() => '');
+    const challenge = /cloudflare|just a moment|cf-chl|challenge-platform/i.test(text);
+    throw new ProviderError(
+      provider,
+      response.ok ? 502 : response.status,
+      challenge
+        ? 'CodeCraft returned a Cloudflare HTML challenge instead of an API response. Verify the API hostname and ask CodeCraft support to allow server-side API requests.'
+        : 'CodeCraft returned HTML instead of a JSON API response. Verify the API endpoint.'
+    );
+  }
   if (response.ok) return;
   const text = await response.text().catch(() => '');
-  throw new ProviderError(provider, response.status, text.slice(0, 1000) || `Provider returned ${response.status}`);
+  const safeText = contentType.includes('text/html')
+    ? 'Provider returned an HTML page instead of an API error response.'
+    : text.slice(0, 1000);
+  throw new ProviderError(provider, response.status, safeText || `Provider returned ${response.status}`);
 }
 
 async function* readSSE(body: ReadableStream<Uint8Array>, onActivity?: () => void): AsyncGenerator<string> {
@@ -178,7 +195,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
     }
 
     const url = attempt.provider === 'codecraft'
-      ? 'https://codecraftapi.com/v1/chat/completions'
+      ? 'https://www.codecraftapi.com/v1/chat/completions'
       : attempt.provider === 'groq'
         ? 'https://api.groq.com/openai/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';

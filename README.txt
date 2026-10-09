@@ -1,8 +1,21 @@
-Nexa Code AI — root failover.ts patch
+Nexa Code AI — CodeCraft Cloudflare response fix
 
-Fixes the Vercel TypeScript error at ./failover.ts:337 by including CodeCraft in the Provider union and provider maps.
+Changed files only:
+- failover.ts
+- lib/ai/failover.ts
 
-Apply this file to the ROOT of the existing Nexa Code AI repository, replacing the existing root-level failover.ts.
-Do NOT place it in lib/ai/.
+What changed:
+- Both CodeCraft chat-completions URLs now use https://www.codecraftapi.com/v1/chat/completions.
+- CodeCraft responses with text/html are detected and reported as an endpoint/security-challenge error instead of being treated as a successful empty model response.
+- HTML errors from other providers are summarized rather than copied into the error message.
 
-This is a changed-file patch, not a full project ZIP. The patch has not been validated with a full production build against the live main branch.
+Apply to your existing repository:
+1. Extract the ZIP.
+2. Copy both files to the same paths in the repository root:
+   - failover.ts -> <repo>/failover.ts
+   - lib/ai/failover.ts -> <repo>/lib/ai/failover.ts
+3. Commit and push to main so Vercel rebuilds.
+
+Important:
+This patch does not bypass Cloudflare. If the www hostname also returns a Cloudflare challenge, CodeCraft must fix or permit API access from server-side requests. Use the configured Gemini/Groq/OpenRouter fallback providers while that is resolved.
+No full production build or live API request was run for this patch.
