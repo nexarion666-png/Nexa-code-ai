@@ -181,7 +181,7 @@ export async function POST(request: Request) {
   // repair pass so missing shell files (especially src/app/page.tsx) are generated instead
   // of creating fake placeholders or forcing the user to regenerate manually.
   let validationError = '';
-  for (let repairAttempt = 0; repairAttempt < 2; repairAttempt++) {
+  for (let repairAttempt = 0; repairAttempt < 4; repairAttempt++) {
     try {
       files = ensureCompleteNextProject(files);
       validationError = '';
@@ -189,9 +189,9 @@ export async function POST(request: Request) {
     } catch (error) {
       validationError = error instanceof Error ? error.message : String(error);
       console.warn(`[NEXA PROPOSAL REPAIR] attempt=${repairAttempt + 1}: ${validationError}`);
-      if (repairAttempt === 1) {
+      if (repairAttempt === 3) {
         console.error('[NEXA PROPOSAL VALIDATION ERROR]', validationError);
-        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: 2 }, { status: 422 });
+        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: 4 }, { status: 422 });
       }
       try {
         const repairedFiles = await repairGeneratedProject({
