@@ -91,33 +91,68 @@ export async function POST(request: Request) {
             headers: {
               Authorization: `Bearer ${apiKey}`,
               'Content-Type': 'application/json',
-              Accept: 'application/json',
+              Accept: 'text/event-stream',
             },
             body: JSON.stringify({
               model: modelId,
               messages: [{ role: 'user', content: 'Reply with exactly: Nexa key test successful.' }],
-              stream: false,
-              max_tokens: 24,
+              stream: true,
+              max_tokens: 30,
               temperature: 0,
             }),
           });
           const { response, text: responseText, contentType } = completionResult;
 
           if (htmlChallenge(contentType, responseText)) {
-            send({ type: 'error', message: `CodeCraft listed models successfully, but chat completions returned an HTML/Cloudflare challenge (HTTP ${response.status}). The key can access /v1/models, but inference has NOT been validated. Content-Type: ${contentType || 'not provided'}. Ask CodeCraft support to check chat-completions access.` });
+            send({ type: 'error', message: `CodeCraft listed models successfully, but streaming chat completions returned an HTML/Cloudflare challenge (HTTP ${response.status}). The key can access /v1/models, but streaming inference has NOT been validated. Content-Type: ${contentType || 'not provided'}. Ask CodeCraft support to check chat-completions access.` });
             return;
           }
 
-          let data: any = null;
-          try { data = JSON.parse(responseText); } catch { /* handled below */ }
           if (!response.ok) {
-            send({ type: 'error', message: `CodeCraft inference test failed (${response.status}) using model "${modelId}": ${safeErrorMessage(data, response.status)}` });
-          } else if (typeof data?.choices?.[0]?.message?.content === 'string') {
-            send({ type: 'chunk', text: data.choices[0].message.content });
-            send({ type: 'done', model: modelId, modelsAvailable: models.length });
-          } else {
-            send({ type: 'error', message: `CodeCraft returned HTTP ${response.status}, but not a recognizable chat-completions response for model "${modelId}". Content-Type: ${contentType || 'not provided'}.` });
+            let data: any = null;
+            try { data = JSON.parse(responseText); } catch { /* preserve non-JSON error below */ }
+            send({ type: 'error', message: `CodeCraft streaming inference test failed (${response.status}) using model "${modelId}": ${safeErrorMessage(data, response.status)}${!data ? ` — ${responseText.slice(0, 180).replace(/[\\r\\n]+/g, ' ')}` : ''}` });
+            return;
           }
+
+          // Parse the same SSE format used by the real chat/generation path.
+          // The endpoint helper buffers the response text, so split by event boundaries
+          // rather than assuming one network chunk equals one JSON event.
+          let streamedText = '';
+          let sawDone = false;
+          for (const event of responseText.split(/\\r?\\n\\r?\\n/)) {
+            const data = event
+              .split(/\\r?\\n/)
+              .filter(line => line.startsWith('data:'))
+              .map(line => line.slice(5).trimStart())
+              .join('\\n');
+            if (!data) continue;
+            if (data.trim() === '[DONE]') {
+              sawDone = true;
+              break;
+            }
+            try {
+              const chunk: any = JSON.parse(data);
+              const content = chunk?.choices?.[0]?.delta?.content;
+              if (typeof content === 'string') streamedText += content;
+              const messageContent = chunk?.choices?.[0]?.message?.content;
+              if (typeof messageContent === 'string') streamedText += messageContent;
+              if (chunk?.error) {
+                send({ type: 'error', message: `CodeCraft streaming inference failed: ${safeErrorMessage(chunk, response.status)}` });
+                return;
+              }
+            } catch {
+              // Ignore non-JSON SSE comments/events; report a useful error if no content arrives.
+            }
+          }
+
+          if (streamedText) {
+            send({ type: 'chunk', text: streamedText });
+            send({ type: 'done', model: modelId, modelsAvailable: models.length, streaming: true, sawDone });
+          } else {
+            send({ type: 'error', message: `CodeCraft returned HTTP ${response.status}, but no assistant text could be parsed from its streaming response for model "${modelId}". Content-Type: ${contentType || 'not provided'}. Check the stream format and model access.` });
+          }
+
         } else {
           await streamWithFailover({
             provider,
