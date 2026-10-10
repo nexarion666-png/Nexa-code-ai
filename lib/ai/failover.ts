@@ -89,7 +89,28 @@ async function assertOk(response: Response, provider: Provider): Promise<void> {
   // response. Never treat that page as an empty successful model response.
   if (provider === 'codecraft' && contentType.includes('text/html')) {
     const text = await response.text().catch(() => '');
-    const challenge = /cloudflare|just a moment|cf-chl|challenge-platform/i.test(text);
+    const challenge = /cloudflare|just a moment|cf-chl|challenge-platform|attention required/i.test(text);
+    // Log only response metadata and a short, sanitized page title. Never log
+    // the Authorization header, API key, or the full upstream HTML body.
+    const rawTitle = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '';
+    const pageTitle = rawTitle
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160) || undefined;
+    console.warn('[CODECRAFT UPSTREAM HTML]', {
+      status: response.status,
+      ok: response.ok,
+      contentType,
+      server: response.headers.get('server') ?? undefined,
+      rayId: response.headers.get('cf-ray') ?? undefined,
+      cfMitigated: response.headers.get('cf-mitigated') ?? undefined,
+      pageTitle,
+      challengeDetected: challenge,
+    });
     throw new ProviderError(
       provider,
       response.ok ? 502 : response.status,
