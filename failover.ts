@@ -2,7 +2,7 @@ export type Provider = 'codecraft' | 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  codecraft: ['deepseek-v4-flash-0731', 'gemma-2-2b'],
+  codecraft: ['claude-fable-5', 'gpt-5.6-sol', 'claude-opus-4.8'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
   openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
@@ -169,7 +169,7 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
     const url = attempt.provider === 'groq'
       ? 'https://api.groq.com/openai/v1/chat/completions'
       : attempt.provider === 'codecraft'
-        ? 'https://www.codecraftapi.com/v1/chat/completions'
+        ? 'https://codecraftapi.com/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';
     const headers: Record<string, string> = { Authorization: `Bearer ${attempt.key.value}`, 'Content-Type': 'application/json' };
     if (attempt.provider === 'openrouter') {

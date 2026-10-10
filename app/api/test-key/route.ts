@@ -44,7 +44,7 @@ export async function POST(request: Request) {
         if (provider === 'codecraft') {
           // First check the documented models endpoint. This distinguishes API access,
           // key/scope failures, and Cloudflare challenges from inference/model failures.
-          const modelsResult = await codeCraftRequest('https://www.codecraftapi.com/v1/models', {
+          const modelsResult = await codeCraftRequest('https://codecraftapi.com/v1/models', {
             method: 'GET',
             headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
           });
@@ -79,10 +79,14 @@ export async function POST(request: Request) {
 
           // Prefer the documented example when it is actually listed; otherwise use
           // a model returned by this key instead of hardcoding a potentially unavailable ID.
-          const selected = models.find(model => model.id === 'claude-opus-4.8') ?? models[0];
+          const selected =
+            models.find(model => model.id === 'claude-fable-5') ??
+            models.find(model => model.id === 'gpt-5.6-sol') ??
+            models.find(model => model.id === 'claude-opus-4.8') ??
+            models[0];
           const modelId = String(selected.id);
 
-          const completionResult = await codeCraftRequest('https://www.codecraftapi.com/v1/chat/completions', {
+          const completionResult = await codeCraftRequest('https://codecraftapi.com/v1/chat/completions', {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${apiKey}`,

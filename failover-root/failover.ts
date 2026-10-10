@@ -2,7 +2,7 @@ export type Provider = 'codecraft' | 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  codecraft: ['deepseek-v4-flash-0731', 'gemma-2-2b'],
+  codecraft: ['claude-fable-5', 'gpt-5.6-sol', 'claude-opus-4.8'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
   openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
