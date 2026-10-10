@@ -30,13 +30,13 @@ export function SettingsClient({ initialKeys }: { initialKeys: KeyStatus[] }) {
   async function test(provider: Provider, keyName: string) {
     const id = `${provider}-${keyName}`; const key = values[id] ?? '';
     if (!key) { setTests(t => ({...t, [id]: 'Enter a key first.'})); return; }
-    setBusy(`test-${id}`); setTests(t => ({...t, [id]: 'Testing stream…'}));
+    setBusy(`test-${id}`); setTests(t => ({...t, [id]: 'Testing key and inference…'}));
     try {
       const res = await fetch('/api/test-key', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({provider,apiKey:key}) });
       if (!res.body) throw new Error('No streaming response.');
       const reader = res.body.getReader(); const decoder = new TextDecoder(); let buffer=''; let ok=false; let error='';
       while(true){ const {value,done}=await reader.read(); if(done) break; buffer += decoder.decode(value,{stream:true}); const events=buffer.split(/\r?\n\r?\n/); buffer=events.pop()??''; for(const event of events){ const line=event.split(/\r?\n/).find(x=>x.startsWith('data:')); if(!line) continue; const payload=JSON.parse(line.slice(5).trim()); if(payload.type==='done') ok=true; if(payload.type==='error') error=payload.message; }}
-      setTests(t=>({...t,[id]: error || (ok ? 'Streaming test passed.' : 'Test ended without confirmation.')}));
+      setTests(t=>({...t,[id]: error || (ok ? 'Key and inference test passed.' : 'Test ended without confirmation.')}));
     } catch(e){ setTests(t=>({...t,[id]:e instanceof Error?e.message:'Test failed.'})); }
     setBusy(null);
   }
