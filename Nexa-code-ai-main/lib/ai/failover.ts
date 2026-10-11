@@ -1,9 +1,9 @@
-export type Provider = 'codecraft' | 'gemini' | 'groq' | 'openrouter';
+export type Provider = 'cleanapis' | 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  // CodeCraft is the primary provider. Keep the list to models shown in the user's catalogue.
-  codecraft: ['claude-fable-5', 'gpt-5.6-sol', 'claude-opus-4.8'],
+  // cleanapis is the primary provider. Keep the list to models shown in the user's catalogue.
+  cleanapis: ['gemini-3.7-flash', 'deepseek-v4-flash-0731', 'claude-sonnet-5'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
   openrouter: ['google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'google/gemini-3-flash-preview'],
@@ -15,7 +15,7 @@ const CHAT_OUTPUT_TOKENS = 4096;
 const GEMINI_GENERATION_OUTPUT_TOKENS = 12288;
 const GROQ_GENERATION_OUTPUT_TOKENS = 2048;
 const OPENROUTER_GENERATION_OUTPUT_TOKENS = 4096;
-const CODECRAFT_GENERATION_OUTPUT_TOKENS = 8192;
+const CLEANAPIS_GENERATION_OUTPUT_TOKENS = 8192;
 const REPAIR_OUTPUT_TOKENS = 2048;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
@@ -26,7 +26,7 @@ function outputTokenBudget(provider: Provider, mode: 'chat' | 'generation' | 're
   if (mode === 'repair') return REPAIR_OUTPUT_TOKENS;
   if (provider === 'gemini') return GEMINI_GENERATION_OUTPUT_TOKENS;
   if (provider === 'groq') return GROQ_GENERATION_OUTPUT_TOKENS;
-  if (provider === 'codecraft') return CODECRAFT_GENERATION_OUTPUT_TOKENS;
+  if (provider === 'cleanapis') return CLEANAPIS_GENERATION_OUTPUT_TOKENS;
   return OPENROUTER_GENERATION_OUTPUT_TOKENS;
 }
 
@@ -63,7 +63,7 @@ export type CooldownStatus = Record<Provider, { cooldownUntil: number; cooldownS
 export function getCooldownStatus(): CooldownStatus {
   const now = Date.now();
   return {
-    codecraft: { cooldownUntil: cooldownUntil.codecraft ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.codecraft ?? 0) - now) / 1000)) },
+    cleanapis: { cooldownUntil: cooldownUntil.cleanapis ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.cleanapis ?? 0) - now) / 1000)) },
     gemini: { cooldownUntil: cooldownUntil.gemini ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.gemini ?? 0) - now) / 1000)) },
     groq: { cooldownUntil: cooldownUntil.groq ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.groq ?? 0) - now) / 1000)) },
     openrouter: { cooldownUntil: cooldownUntil.openrouter ?? 0, cooldownSeconds: Math.max(0, Math.ceil(((cooldownUntil.openrouter ?? 0) - now) / 1000)) },
@@ -87,7 +87,7 @@ async function assertOk(response: Response, provider: Provider): Promise<void> {
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   // Some API hostnames can return a Cloudflare HTML challenge instead of an API
   // response. Never treat that page as an empty successful model response.
-  if (provider === 'codecraft' && contentType.includes('text/html')) {
+  if (provider === 'cleanapis' && contentType.includes('text/html')) {
     const text = await response.text().catch(() => '');
     const challenge = /cloudflare|just a moment|cf-chl|challenge-platform/i.test(text);
     // Diagnostic-only logging: never log authorization headers or the full HTML body.
@@ -95,7 +95,7 @@ async function assertOk(response: Response, provider: Provider): Promise<void> {
     const cfMitigated = response.headers.get('cf-mitigated');
     const server = response.headers.get('server');
     const bodyMarker = text.match(/<title[^>]*>\s*([^<]{1,120})\s*<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim();
-    console.error('[CODECRAFT UPSTREAM HTML]', JSON.stringify({
+    console.error('[CLEAN APIS UPSTREAM HTML]', JSON.stringify({
       status: response.status,
       ok: response.ok,
       contentType,
@@ -109,8 +109,8 @@ async function assertOk(response: Response, provider: Provider): Promise<void> {
       provider,
       response.ok ? 502 : response.status,
       challenge
-        ? 'CodeCraft returned a Cloudflare HTML challenge instead of an API response. Check [CODECRAFT UPSTREAM HTML] diagnostics and ask CodeCraft support to allow server-side API requests.'
-        : 'CodeCraft returned HTML instead of a JSON API response. Check [CODECRAFT UPSTREAM HTML] diagnostics and verify the API endpoint.'
+        ? 'cleanapis returned a Cloudflare HTML challenge instead of an API response. Check [CLEAN APIS UPSTREAM HTML] diagnostics and ask cleanapis support to allow server-side API requests.'
+        : 'cleanapis returned HTML instead of a JSON API response. Check [CLEAN APIS UPSTREAM HTML] diagnostics and verify the API endpoint.'
     );
   }
   if (response.ok) return;
@@ -209,8 +209,8 @@ async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation'
       return;
     }
 
-    const url = attempt.provider === 'codecraft'
-      ? 'https://codecraftapi.com/v1/chat/completions'
+    const url = attempt.provider === 'cleanapis'
+      ? 'https://cleanapis.com/v1/chat/completions'
       : attempt.provider === 'groq'
         ? 'https://api.groq.com/openai/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';
@@ -356,8 +356,8 @@ export function createStreamingFailover({
   isChat?: boolean;
 }): ReadableStream<string> {
   const order: Provider[] = isChat
-    ? [requestedProvider, 'codecraft', 'groq', 'gemini', 'openrouter']
-    : [requestedProvider, 'codecraft', 'gemini', 'groq', 'openrouter'];
+    ? [requestedProvider, 'cleanapis', 'groq', 'gemini', 'openrouter']
+    : [requestedProvider, 'cleanapis', 'gemini', 'groq', 'openrouter'];
   const uniqueOrder = order.filter((provider, index) => order.indexOf(provider) === index);
 
   return new ReadableStream<string>({
@@ -441,11 +441,11 @@ export async function streamWithFailover({
   mode?: 'chat' | 'generation' | 'repair';
 }): Promise<void> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
-  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { codecraft: [], gemini: [], groq: [], openrouter: [] };
+  const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { cleanapis: [], gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = normalize(keys);
   if (!allKeys[provider]?.length) throw new Error('AI_UNAVAILABLE::[]::No configured key for requested provider');
 
-  const orderedProviders: Provider[] = [provider, 'codecraft', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
+  const orderedProviders: Provider[] = [provider, 'cleanapis', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
   let lastError = 'All providers failed';
   const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
 

@@ -3,10 +3,10 @@
 import { useState } from 'react';
 import { Eye, EyeOff, CheckCircle2, Loader2, KeyRound } from 'lucide-react';
 
-type Provider = 'codecraft' | 'gemini' | 'groq' | 'openrouter';
+type Provider = 'cleanapis' | 'gemini' | 'groq' | 'openrouter';
 type KeyStatus = { provider: string; key_name: string };
 const providers: { id: Provider; title: string; hint: string }[] = [
-  { id: 'codecraft', title: 'CodeCraft API (Primary)', hint: 'DeepSeek V4 Flash and other listed models' },
+  { id: 'cleanapis', title: 'Clean APIs (Primary)', hint: 'Gemini, DeepSeek, Claude and other hosted models' },
   { id: 'gemini', title: 'Gemini', hint: 'Google AI Studio' },
   { id: 'groq', title: 'Groq', hint: 'Fast inference' },
   { id: 'openrouter', title: 'OpenRouter', hint: 'Multi-model routing' }

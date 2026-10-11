@@ -1,21 +1,19 @@
-Nexa Code AI — CodeCraft Cloudflare response fix
+Nexa Code AI — Clean APIs provider replacement patch
 
-Changed files only:
-- failover.ts
-- lib/ai/failover.ts
+This patch removes the retired primary provider from Nexa's active configuration and sets Clean APIs as the primary OpenAI-compatible streaming provider.
 
-What changed:
-- Both CodeCraft chat-completions URLs now use https://www.codecraftapi.com/v1/chat/completions.
-- CodeCraft responses with text/html are detected and reported as an endpoint/security-challenge error instead of being treated as a successful empty model response.
-- HTML errors from other providers are summarized rather than copied into the error message.
+Clean APIs:
+- Base URL: https://cleanapis.com/v1
+- Chat completions: https://cleanapis.com/v1/chat/completions
+- Initial model order: gemini-3.7-flash, deepseek-v4-flash-0731, claude-sonnet-5
+- API keys use Nexa's existing encrypted BYOK mechanism.
+- Gemini direct API, Groq, and OpenRouter remain available as fallbacks.
 
-Apply to your existing repository:
-1. Extract the ZIP.
-2. Copy both files to the same paths in the repository root:
-   - failover.ts -> <repo>/failover.ts
-   - lib/ai/failover.ts -> <repo>/lib/ai/failover.ts
-3. Commit and push to main so Vercel rebuilds.
+Apply:
+1. Copy each file from this patch over the same path in your repository.
+2. Delete the obsolete migration listed in DELETE_FILES.txt.
+3. Run supabase/migrations/202610110001_replace_primary_provider.sql in Supabase SQL Editor for an existing database. This removes credentials for unsupported providers and updates the provider constraint; it does not turn old credentials into Clean APIs keys.
+4. Add your Clean APIs key under Settings → AI Keys, save it, and use Test.
+5. Push to main and verify the Vercel deployment and a chat request.
 
-Important:
-This patch does not bypass Cloudflare. If the www hostname also returns a Cloudflare challenge, CodeCraft must fix or permit API access from server-side requests. Use the configured Gemini/Groq/OpenRouter fallback providers while that is resolved.
-No full production build or live API request was run for this patch.
+The user confirmed the Clean APIs models endpoint and streaming work from Termux. This patch has not been built or deployed to Vercel, so verify the deployed integration before relying on it.
