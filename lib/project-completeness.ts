@@ -117,9 +117,12 @@ function resolveLocalImport(fromPath: string, specifier: string, files: Set<stri
   return baseCandidates.some(base => suffixes.some(suffix => files.has(normalizePath(`${base}${suffix}`))));
 }
 
-function validateLocalImports(files: ProjectFile[]) {
-  const paths = new Set(files.map(file => file.path));
-  const aliases = getTsconfigPaths(files);
+function validateLocalImports(files: ProjectFile[], existingFiles: ProjectFile[] = []) {
+  // Imports may legitimately point to files already present in the project, even
+  // when those files are not part of this proposal. Use both sets for resolution.
+  const allFiles = [...existingFiles, ...files];
+  const paths = new Set(allFiles.map(file => normalizePath(file.path)));
+  const aliases = getTsconfigPaths(allFiles);
   const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\()(['"])([^'"]+)\1/g;
   for (const file of files) {
     importPattern.lastIndex = 0;
@@ -158,7 +161,7 @@ function validatePackage(files: ProjectFile[]) {
   }
 }
 
-export function ensureCompleteNextProject(input: ProjectFile[], options: { requireShell?: boolean } = {}) {
+export function ensureCompleteNextProject(input: ProjectFile[], options: { requireShell?: boolean; existingFiles?: ProjectFile[] } = {}) {
   const files = dedupeLast(input);
   if (!files.length) throw new ProjectCompletenessError('Nexa returned no files.');
   if (!looksLikeNextProject(files)) return files;
@@ -166,7 +169,7 @@ export function ensureCompleteNextProject(input: ProjectFile[], options: { requi
   validateJson(files);
   validateContents(files);
   validatePackage(files);
-  validateLocalImports(files);
+  validateLocalImports(files, options.existingFiles ?? []);
 
   const requireShell = options.requireShell ?? true;
   const packageFile = get(files, 'package.json');

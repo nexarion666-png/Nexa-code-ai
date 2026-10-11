@@ -184,7 +184,7 @@ export async function POST(request: Request) {
   let validationError = '';
   for (let repairAttempt = 0; repairAttempt < 4; repairAttempt++) {
     try {
-      files = ensureCompleteNextProject(files);
+      files = ensureCompleteNextProject(files, { existingFiles: existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })) });
       validationError = '';
       break;
     } catch (error) {
@@ -198,7 +198,11 @@ export async function POST(request: Request) {
         const repairedFiles = await repairGeneratedProject({
           provider,
           keysByProvider: failoverKeysByProvider,
-          currentFiles: files,
+          currentFiles: [
+            ...existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })),
+            ...files.filter(file => !existingFiles.some(existing => existing.path === file.path)),
+            ...files.filter(file => existingFiles.some(existing => existing.path === file.path)),
+          ],
           validationError,
         });
         if (!repairedFiles.length) throw new Error('Repair provider returned no file blocks.');

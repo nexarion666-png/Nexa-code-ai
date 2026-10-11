@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AtSign, Bot, Loader2, Paperclip, Plus, Send, Sparkles, GitCompareArrows } from 'lucide-react';
+import { AtSign, Bot, Check, Copy, Loader2, Paperclip, Plus, Send, Sparkles, GitCompareArrows } from 'lucide-react';
 
 type Message = { id?: string; role: 'user' | 'assistant'; content: string; created_at?: string };
 
@@ -49,6 +49,7 @@ function sseParser() {
 export function ChatPanel({ projectId, initialMessages, initialProposal, onProposalGenerated, onReviewChanges, appliedSignal = 0 }: { projectId: string; initialMessages: Message[]; initialProposal?: { id: string; status: string; changesCount: number } | null; onProposalGenerated?: (proposalId: string) => void; onReviewChanges?: () => void; appliedSignal?: number }) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState('');
+  const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
@@ -142,9 +143,32 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     finally { setGenerating(false); }
   }
 
+  async function copyMessage(content: string, messageKey: string) {
+    try {
+      if (navigator.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = content;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (!copied) throw new Error('Clipboard copy was blocked');
+      }
+      setCopiedMessageKey(messageKey);
+      window.setTimeout(() => setCopiedMessageKey(current => current === messageKey ? null : current), 1600);
+    } catch {
+      setError('Could not copy this message. Please select the text and copy it manually.');
+    }
+  }
+
   return <div className="space-y-3 pb-52">
     {messages.length === 0 && <article className="rounded-3xl border border-zinc-800 bg-[#10131f] p-5"><div className="flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200"><Sparkles size={21}/></div><div><div className="font-semibold text-indigo-100">NEXA</div><p className="mt-2 text-sm leading-6 text-zinc-400">Tell me what you want to build, fix, or improve. Nexa can inspect this project's files and will only ask questions when something is genuinely unclear.</p></div></div></article>}
-    {messages.map((message,i)=><article key={message.id ?? `${message.created_at}-${i}`} className={`rounded-3xl border border-zinc-800 p-4 ${message.role==='assistant'?'bg-[#10131f]':'bg-[#0d1425]'}`}><div className="flex gap-3"><div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${message.role==='assistant'?'bg-violet-500/20 text-violet-200':'bg-indigo-500/20 text-indigo-200'}`}>{message.role==='assistant'?<Sparkles size={20}/>:<span className="text-xs font-bold">You</span>}</div><div className="min-w-0 flex-1"><div className="mb-2 flex items-center justify-between"><span className="font-semibold text-indigo-100">{message.role==='assistant'?'NEXA':'You'}</span><span className="text-[10px] text-zinc-600">{message.created_at ? new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : ''}</span></div>{message.content ? <Markdown content={message.content}/> : streaming && <div className="flex items-center gap-1 py-2"><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:120ms]"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:240ms]"/></div>}</div></div></article>)}
+    {messages.map((message,i)=>{ const messageKey = message.id ?? `${message.created_at ?? 'message'}-${i}`; return <article key={messageKey} className={`rounded-3xl border border-zinc-800 p-4 ${message.role==='assistant'?'bg-[#10131f]':'bg-[#0d1425]'}`}><div className="flex gap-3"><div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${message.role==='assistant'?'bg-violet-500/20 text-violet-200':'bg-indigo-500/20 text-indigo-200'}`}>{message.role==='assistant'?<Sparkles size={20}/>:<span className="text-xs font-bold">You</span>}</div><div className="min-w-0 flex-1"><div className="mb-2 flex items-center justify-between"><span className="font-semibold text-indigo-100">{message.role==='assistant'?'NEXA':'You'}</span><span className="text-[10px] text-zinc-600">{message.created_at ? new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : ''}</span></div>{message.content ? <><Markdown content={message.content}/><div className="mt-3 flex justify-end"><button type="button" onClick={() => void copyMessage(message.content, messageKey)} aria-label={copiedMessageKey === messageKey ? 'Message copied' : 'Copy message'} title={copiedMessageKey === messageKey ? 'Copied' : 'Copy message'} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/80 bg-zinc-900/70 px-2.5 py-1.5 text-xs text-zinc-400 transition hover:border-violet-500/60 hover:bg-violet-500/10 hover:text-violet-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50">{copiedMessageKey === messageKey ? <Check size={13}/> : <Copy size={13}/>}<span>{copiedMessageKey === messageKey ? 'Copied' : 'Copy'}</span></button></div></> : streaming && <div className="flex items-center gap-1 py-2"><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:120ms]"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:240ms]"/></div>}</div></div></article>})}
     {keysExhausted && <div className="bg-red-500/10 border border-red-500 text-red-400 p-3 rounded">
       <div>⚠️ All configured AI keys are currently rate-limited or invalid — {keysExhausted.tried.map((item: any) => `${item.provider} (${item.keysTried ?? 0} key${item.keysTried === 1 ? '' : 's'} tried)`).join(', ')}. Cooldown {retryCountdown}s active. Add a working key in Settings or wait for the cooldown.</div>
       <div className="mt-2 flex items-center justify-between gap-2">
