@@ -77,16 +77,15 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     setKeysExhausted(null); setError('');
   }, [retryCountdown, keysExhausted, streaming, generating]);
 
-  async function send() {
-    const text = input.trim(); if (!text || streaming || generating) return;
-    const editRequest = isConcreteEditRequest(text);
-    setMode(editRequest ? 'agent' : 'conversation');
+  async function send(textOverride?: string, modeOverride?: 'conversation' | 'agent') {
+    const text = (textOverride ?? input).trim(); if (!text || streaming || generating) return;
+    const activeMode = modeOverride ?? mode;
     setInput(''); setError(''); setKeysExhausted(null); setSwitchingProvider(''); setStreaming(true);
     const userMessage: Message = { role: 'user', content: text, created_at: new Date().toISOString() };
     const assistantMessage: Message = { role: 'assistant', content: '', created_at: new Date().toISOString() };
     setMessages(prev => [...prev, userMessage, assistantMessage]);
     try {
-      const response = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({projectId,message:text,history,provider:'cleanapis'}) });
+      const response = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({projectId,message:text,history,provider:'cleanapis',mode:activeMode}) });
       if (!response.ok || !response.body) { const data=await response.json().catch(()=>({})); throw new Error(data.message || data.error || 'Nexa could not start the conversation.'); }
       const reader=response.body.getReader(); const decoder=new TextDecoder(); const parser=sseParser(); let done=false;
       while(!done){ const {value,done:readDone}=await reader.read(); if(readDone) break; const events=parser.push(decoder.decode(value,{stream:true})); for(const event of events){
@@ -99,7 +98,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
           // [PROPOSAL_READY] marker. The marker is an AI output hint, not a
           // reliable UI state signal. This keeps Describe -> Proposal working
           // consistently across repeated fixes.
-          if(event.proposalReady || editRequest) setProposalReady(true);
+          if(event.proposalReady || activeMode === 'agent') setProposalReady(true);
         }
         if(event.type==='switching'){ setSwitchingProvider(event.provider); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:event.provider==='groq'?'fallback':'primary'})); }
         if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All configured keys are rate-limited or invalid.',retryAfter:event.retryAfter ?? 60}); setError(''); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
@@ -109,6 +108,18 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
       }}
     } catch(e) { const msg=e instanceof Error?e.message:'Something went wrong.'; if(msg !== 'KEYS_EXHAUSTED') setError(msg); setMessages(prev=>prev[prev.length-1]?.role==='assistant' && !prev[prev.length-1].content ? prev.slice(0,-1) : prev); }
     finally { setStreaming(false); setSwitchingProvider(''); setTimeout(()=>inputRef.current?.focus(), 50); }
+  }
+
+  function sendPromptToAgent(prompt: string) {
+    const cleanPrompt = prompt.replace(/\[PROPOSAL_READY\]/g, '').trim();
+    setMode('agent');
+    void send(cleanPrompt, 'agent');
+  }
+
+  function sendCompletionReportToConversation() {
+    const report = `Agent task status\nProposal ID: ${proposalId || 'not generated'}\nFiles proposed: ${changesCount}\nStatus: Changes are prepared for review; they have not been applied yet.\nPlease continue planning based on this status and suggest the next step.`;
+    setMode('conversation');
+    void send(report, 'conversation');
   }
 
   async function generateProposal() {
@@ -167,8 +178,10 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   }
 
   return <div className="space-y-3 pb-52">
-    {messages.length === 0 && <article className="rounded-3xl border border-zinc-800 bg-[#10131f] p-5"><div className="flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200"><Sparkles size={21}/></div><div><div className="font-semibold text-indigo-100">NEXA</div><p className="mt-2 text-sm leading-6 text-zinc-400">Tell me what you want to build, fix, or improve. Nexa can inspect this project's files and will only ask questions when something is genuinely unclear.</p></div></div></article>}
-    {messages.map((message,i)=>{ const messageKey = message.id ?? `${message.created_at ?? 'message'}-${i}`; return <article key={messageKey} className={`rounded-3xl border border-zinc-800 p-4 ${message.role==='assistant'?'bg-[#10131f]':'bg-[#0d1425]'}`}><div className="flex gap-3"><div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${message.role==='assistant'?'bg-violet-500/20 text-violet-200':'bg-indigo-500/20 text-indigo-200'}`}>{message.role==='assistant'?<Sparkles size={20}/>:<span className="text-xs font-bold">You</span>}</div><div className="min-w-0 flex-1"><div className="mb-2 flex items-center justify-between"><span className="font-semibold text-indigo-100">{message.role==='assistant'?'NEXA':'You'}</span><span className="text-[10px] text-zinc-600">{message.created_at ? new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : ''}</span></div>{message.content ? <><Markdown content={message.content}/><div className="mt-3 flex justify-end"><button type="button" onClick={() => void copyMessage(message.content, messageKey)} aria-label={copiedMessageKey === messageKey ? 'Message copied' : 'Copy message'} title={copiedMessageKey === messageKey ? 'Copied' : 'Copy message'} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/80 bg-zinc-900/70 px-2.5 py-1.5 text-xs text-zinc-400 transition hover:border-violet-500/60 hover:bg-violet-500/10 hover:text-violet-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50">{copiedMessageKey === messageKey ? <Check size={13}/> : <Copy size={13}/>}<span>{copiedMessageKey === messageKey ? 'Copied' : 'Copy'}</span></button></div></> : streaming && <div className="flex items-center gap-1 py-2"><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:120ms]"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:240ms]"/></div>}</div></div></article>})}
+    {messages.length === 0 && <article className="rounded-3xl border border-zinc-800 bg-[#10131f] p-5"><div className="flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200"><Sparkles size={21}/></div><div><div className="font-semibold text-indigo-100">NEXA</div><p className="mt-2 text-sm leading-6 text-zinc-400">Use Conversation Mode to discuss and prepare a final prompt. Switch to Agent Mode when you want Nexa to inspect the project and prepare file changes.</p></div></div></article>}
+    {messages.map((message,i)=>{ const messageKey = message.id ?? `${message.created_at ?? 'message'}-${i}`; return <article key={messageKey} className={`rounded-3xl border border-zinc-800 p-4 ${message.role==='assistant'?'bg-[#10131f]':'bg-[#0d1425]'}`}><div className="flex gap-3"><div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${message.role==='assistant'?'bg-violet-500/20 text-violet-200':'bg-indigo-500/20 text-indigo-200'}`}>{message.role==='assistant'?<Sparkles size={20}/>:<span className="text-xs font-bold">You</span>}</div><div className="min-w-0 flex-1"><div className="mb-2 flex items-center justify-between"><span className="font-semibold text-indigo-100">{message.role==='assistant'?'NEXA':'You'}</span><span className="text-[10px] text-zinc-600">{message.created_at ? new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : ''}</span></div>{message.content ? <><Markdown content={message.content}/>
+          {message.role === 'assistant' && message.content.includes('[PROPOSAL_READY]') && mode === 'conversation' && <div className="mt-3"><button type="button" onClick={() => sendPromptToAgent(message.content)} disabled={streaming || generating} className="rounded-xl border border-violet-400/50 bg-violet-600/20 px-3 py-2 text-xs font-semibold text-violet-100 hover:bg-violet-600/30 disabled:opacity-40"><Bot size={14} className="mr-1 inline"/>Send this prompt to Agent</button></div>}
+          <div className="mt-3 flex justify-end"><button type="button" onClick={() => void copyMessage(message.content, messageKey)} aria-label={copiedMessageKey === messageKey ? 'Message copied' : 'Copy message'} title={copiedMessageKey === messageKey ? 'Copied' : 'Copy message'} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/80 bg-zinc-900/70 px-2.5 py-1.5 text-xs text-zinc-400 transition hover:border-violet-500/60 hover:bg-violet-500/10 hover:text-violet-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50">{copiedMessageKey === messageKey ? <Check size={13}/> : <Copy size={13}/>}<span>{copiedMessageKey === messageKey ? 'Copied' : 'Copy'}</span></button></div></> : streaming && <div className="flex items-center gap-1 py-2"><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:120ms]"/><span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:240ms]"/></div>}</div></div></article>})}
     {keysExhausted && <div className="bg-red-500/10 border border-red-500 text-red-400 p-3 rounded">
       <div>⚠️ All configured AI keys are currently rate-limited or invalid — {keysExhausted.tried.map((item: any) => `${item.provider} (${item.keysTried ?? 0} key${item.keysTried === 1 ? '' : 's'} tried)`).join(', ')}. Cooldown {retryCountdown}s active. Add a working key in Settings or wait for the cooldown.</div>
       <div className="mt-2 flex items-center justify-between gap-2">
@@ -179,14 +192,18 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     {switchingProvider && <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 px-4 py-3 text-xs text-violet-200">Nexa is switching providers… trying {switchingProvider} next.</div>}
     {error && <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs leading-5 text-amber-200">{error}</div>}
     {proposalReady && <button onClick={generateProposal} disabled={generating} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-400/50 bg-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_0_24px_rgba(139,92,246,.35)]">{generating ? <Loader2 size={17} className="animate-spin"/> : <GitCompareArrows size={17}/>}Generate Proposal</button>}
-    {proposalId && changesCount > 0 && <button onClick={onReviewChanges} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-500/40 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-200"><GitCompareArrows size={17}/>Review Changes · {changesCount}</button>}
+    {proposalId && changesCount > 0 && <><button onClick={onReviewChanges} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-500/40 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-200"><GitCompareArrows size={17}/>Review Changes · {changesCount}</button><button onClick={sendCompletionReportToConversation} disabled={streaming || generating} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-700 bg-zinc-900/70 px-4 py-2.5 text-xs font-semibold text-zinc-300 disabled:opacity-40">↩ Send status report to Conversation</button></>}
     <div ref={endRef}/>
 
     <div className="fixed bottom-[65px] left-0 right-0 z-40 w-full px-3 pb-2">
       <div className="rounded-[24px] border border-violet-500/80 bg-[#0b1021]/96 p-2 shadow-[0_0_35px_rgba(76,29,149,.45)] backdrop-blur-xl">
-        <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-indigo-300"><Sparkles size={14}/><span>{mode === 'agent' ? 'Edit Mode · Nexa can inspect your project and prepare changes' : 'Conversation Mode · Nexa asks before building'}</span></div>
+        <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-indigo-300"><Sparkles size={14}/><span>Choose how Nexa should respond</span></div>
+        <div className="grid grid-cols-2 gap-2 px-2 pb-2">
+          <button type="button" onClick={() => setMode('conversation')} aria-pressed={mode === 'conversation'} className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${mode === 'conversation' ? 'border-violet-400 bg-violet-500/20 text-violet-100' : 'border-zinc-700 bg-zinc-900/60 text-zinc-400'}`}>💬 Conversation</button>
+          <button type="button" onClick={() => setMode('agent')} aria-pressed={mode === 'agent'} className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${mode === 'agent' ? 'border-violet-400 bg-violet-500/20 text-violet-100' : 'border-zinc-700 bg-zinc-900/60 text-zinc-400'}`}>🤖 Agent</button>
+        </div>
         <div className="px-2 pb-1 pt-2"><input ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}} placeholder="Tell Nexa what to build, fix, or improve..." className="w-full bg-transparent text-sm text-zinc-100 outline-none placeholder:text-zinc-500" disabled={streaming || generating}/></div>
-        <div className="flex items-center gap-2 px-1 pb-1 pt-1"><button className="grid h-11 w-11 place-items-center rounded-full bg-zinc-900 text-zinc-300"><Plus/></button><button className="grid h-11 w-11 place-items-center rounded-full bg-zinc-900 text-zinc-300"><Paperclip/></button><button className="hidden h-11 items-center gap-1.5 rounded-full bg-zinc-900 px-4 text-sm text-zinc-200 sm:flex"><AtSign size={17}/>Files</button><button onClick={() => { setMode('agent'); setProposalReady(true); void generateProposal(); }} disabled={streaming || generating} className="ml-auto flex h-11 items-center gap-2 rounded-full border border-violet-500/80 bg-violet-500/10 px-4 text-sm text-violet-200 disabled:opacity-40"><Bot size={18}/>Agent</button><button onClick={send} disabled={streaming || generating || !input.trim()} className="grid h-11 w-11 place-items-center rounded-full bg-white text-black shadow-[0_0_22px_rgba(139,92,246,.65)] disabled:opacity-40"><Send size={19} fill="currentColor"/></button></div>
+        <div className="flex items-center gap-2 px-1 pb-1 pt-1"><button className="grid h-11 w-11 place-items-center rounded-full bg-zinc-900 text-zinc-300"><Plus/></button><button className="grid h-11 w-11 place-items-center rounded-full bg-zinc-900 text-zinc-300"><Paperclip/></button><button className="hidden h-11 items-center gap-1.5 rounded-full bg-zinc-900 px-4 text-sm text-zinc-200 sm:flex"><AtSign size={17}/>Files</button><button onClick={() => setMode(mode === 'conversation' ? 'agent' : 'conversation')} disabled={streaming || generating} className="ml-auto flex h-11 items-center gap-2 rounded-full border border-violet-500/80 bg-violet-500/10 px-3 text-xs text-violet-200 disabled:opacity-40">{mode === 'conversation' ? <Bot size={17}/> : <Sparkles size={17}/>} {mode === 'conversation' ? 'Use Agent' : 'Use Chat'}</button><button onClick={() => void send()} disabled={streaming || generating || !input.trim()} className="grid h-11 w-11 place-items-center rounded-full bg-white text-black shadow-[0_0_22px_rgba(139,92,246,.65)] disabled:opacity-40"><Send size={19} fill="currentColor"/></button></div>
       </div>
     </div>
   </div>;

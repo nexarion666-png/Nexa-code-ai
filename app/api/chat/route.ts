@@ -6,7 +6,9 @@ import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 
 export const runtime = 'nodejs';
 
-const SYSTEM = `You are Nexa Code AI in Conversation Mode. Understand the user's request and help them reach a build-ready specification. Do not ask unnecessary clarifying questions. If the request is detailed enough, make sensible defaults yourself and proceed immediately. Do not write the implementation yet. When the requirements are sufficiently clear, output [PROPOSAL_READY]. Never stall a detailed request with a questionnaire.`;
+const CONVERSATION_SYSTEM = `You are Nexa Code AI in Conversation Mode. Discuss, plan, ask only useful clarifying questions, and help the user prepare a complete final building prompt. Do not modify or generate implementation files in this mode. When the requirements are sufficiently clear, provide a self-contained final prompt and end it with [PROPOSAL_READY]. Never stall a detailed request with a questionnaire.`;
+
+const AGENT_SYSTEM = `You are Nexa Code AI in Agent Mode, a senior coding agent working on the user's EXISTING project. Inspect the provided project file context before deciding what to change. For build requests, implement the requested feature; for fix requests, diagnose the actual cause before repairing it; for edits, make focused changes and preserve unrelated behavior. Do not claim files were changed or tests passed in this chat response: actual file changes are created by the proposal workflow. Briefly state the concrete plan and finish with [PROPOSAL_READY] when you are ready to generate file changes. Avoid unsupported assumptions and do not ask the user to manually fix code you can change through the proposal workflow.`;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -15,6 +17,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
   const projectId = String(body.projectId ?? '');
   const message = String(body.message ?? '').trim();
+  const mode = body.mode === 'agent' ? 'agent' : 'conversation';
   const history = Array.isArray(body.history) ? body.history : [];
   if (!projectId || !message) return NextResponse.json({ error: 'projectId and message are required.' }, { status: 400 });
 
@@ -61,8 +64,31 @@ export async function POST(request: Request) {
     historyChars += item.content.length;
   }
 
+  let projectContext = '';
+  if (mode === 'agent') {
+    const { data: projectFiles, error: projectFilesError } = await supabase
+      .from('project_files')
+      .select('path,content')
+      .eq('project_id', projectId)
+      .order('path');
+    if (projectFilesError) return NextResponse.json({ error: `Could not inspect project files: ${projectFilesError.message}` }, { status: 500 });
+    const files = (projectFiles ?? []) as { path: string; content: string | null }[];
+    let remaining = 18000;
+    const selected: string[] = [];
+    for (const file of files) {
+      if (remaining <= 0) break;
+      const block = `---EXISTING FILE: ${file.path}---\\n${(file.content ?? '').slice(0, Math.min(remaining, 5000))}`;
+      selected.push(block);
+      remaining -= block.length;
+    }
+    projectContext = files.length
+      ? `\\n\\nExisting project files for inspection (context may be truncated):\\n${selected.join('\\n\\n')}`
+      : '\\n\\nNo saved project files were found yet. This may be a new project.';
+  }
+  const systemPrompt = mode === 'agent' ? AGENT_SYSTEM + projectContext : CONVERSATION_SYSTEM;
+
   const messages: AIMessage[] = [
-    { role: 'system', content: SYSTEM },
+    { role: 'system', content: systemPrompt },
     ...cappedHistory,
     { role: 'user', content: message.slice(0, MAX_MESSAGE_CHARS) },
   ];
@@ -71,7 +97,7 @@ export async function POST(request: Request) {
   if (saveUserError) return NextResponse.json({ error: saveUserError.message }, { status: 500 });
 
   const encoder = new TextEncoder();
-  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt: SYSTEM, isChat: true });
+  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt, isChat: true });
   const reader = failoverStream.getReader();
   let first: ReadableStreamReadResult<string>;
   try {
