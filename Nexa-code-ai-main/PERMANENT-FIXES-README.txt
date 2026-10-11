@@ -16,3 +16,6 @@ Apply:
 
 Validation note:
 This patch was inspected but not run through TypeScript or a production build in this environment because node_modules are not installed. Verify with npm ci and npm run build before considering the deployment confirmed.
+
+Build compatibility correction:
+- Iterates the missing-known-dependency Set using Array.from(...) so this file compiles with older TypeScript targets without requiring downlevelIteration.

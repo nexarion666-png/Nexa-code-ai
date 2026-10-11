@@ -221,7 +221,7 @@ function validatePackage(files: ProjectFile[]) {
     }
   }
   if (missingKnown.size) {
-    for (const name of missingKnown) pkg.dependencies[name] = KNOWN_PACKAGE_RANGES[name];
+    for (const name of Array.from(missingKnown)) pkg.dependencies[name] = KNOWN_PACKAGE_RANGES[name];
     packageFile.content = `${JSON.stringify(pkg, null, 2)}\n`;
   }
 }
