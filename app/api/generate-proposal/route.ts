@@ -77,11 +77,14 @@ async function repairGeneratedProject({
     role: 'system',
     content: `You are Nexa's focused project-repair agent. Fix ONLY the validation failure below. Do not redesign the project. Do not replace valid files. Do not create fake placeholders. Output ONLY complete FILE blocks. Keep the existing framework, aliases, and conventions.\n\nVALIDATION ERROR:\n${validationError}\n\nRELEVANT CURRENT FILES:\n${context || '(none)'}`,
   };
+  const needsProjectShell = /requires package\.json|requires app\/page\.tsx or pages\/index\.tsx|requires app\/layout\.tsx/i.test(validationError);
   const repairUser: AIMessage = {
     role: 'user',
     content: missingImportMatch
       ? `Fix this missing import only. The file ${missingImportMatch[1]} imports ${missingSpecifier}. Create the real module at the path implied by tsconfig.json (for @/components/CartDrawer, use components/CartDrawer.tsx or the appropriate existing extension). Infer the component's props and behavior from the importing file and relevant project context. Do not regenerate the importing page unless it is genuinely necessary. Output only the missing/changed complete FILE block(s):\n---FILE: path/to/file.tsx---\nfull file content`
-      : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
+      : needsProjectShell
+        ? `Complete the required Next.js project shell in ONE repair response. Inspect the CURRENT FILES and create every missing required file in this same response: package.json with Next.js and all packages imported by generated files, a real app/page.tsx (or pages/index.tsx if the project uses Pages Router), and app/layout.tsx when using App Router. Preserve the existing design and feature requirements; do not create a fake placeholder homepage. Do not repeat files that already exist unless they need a compatible update. Output only complete FILE blocks.`
+        : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
   };
 
   // Repair with the provider that just produced the generation successfully;

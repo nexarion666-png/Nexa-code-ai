@@ -164,15 +164,22 @@ function validatePackage(files: ProjectFile[]) {
 export function ensureCompleteNextProject(input: ProjectFile[], options: { requireShell?: boolean; existingFiles?: ProjectFile[] } = {}) {
   const files = dedupeLast(input);
   if (!files.length) throw new ProjectCompletenessError('Nexa returned no files.');
-  if (!looksLikeNextProject(files)) return files;
 
+  // Validate a proposal in the context of the whole project. Proposals usually
+  // contain only changed files, so the existing package.json/homepage/layout
+  // must count when checking whether this is a complete Next.js project.
+  const existingFiles = options.existingFiles ?? [];
+  const projectFiles = dedupeLast([...existingFiles, ...files]);
+  if (!looksLikeNextProject(projectFiles)) return files;
+
+  // Only validate generated content. Existing files are context, not new output.
   validateJson(files);
   validateContents(files);
   validatePackage(files);
-  validateLocalImports(files, options.existingFiles ?? []);
+  validateLocalImports(files, existingFiles);
 
   const requireShell = options.requireShell ?? true;
-  const packageFile = get(files, 'package.json');
+  const packageFile = get(projectFiles, 'package.json');
   if (requireShell) {
     if (!packageFile) throw new ProjectCompletenessError('Complete Next.js generation requires package.json.');
     let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
@@ -180,18 +187,18 @@ export function ensureCompleteNextProject(input: ProjectFile[], options: { requi
     if (!pkg.dependencies?.next && !pkg.devDependencies?.next) throw new ProjectCompletenessError('package.json does not declare Next.js.');
 
     const hasAppPage = Boolean(
-      get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js') ||
-      get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js')
+      get(projectFiles, 'app/page.tsx') || get(projectFiles, 'app/page.jsx') || get(projectFiles, 'app/page.ts') || get(projectFiles, 'app/page.js') ||
+      get(projectFiles, 'src/app/page.tsx') || get(projectFiles, 'src/app/page.jsx') || get(projectFiles, 'src/app/page.ts') || get(projectFiles, 'src/app/page.js')
     );
     const hasPagesIndex = Boolean(
-      get(files, 'pages/index.tsx') || get(files, 'pages/index.jsx') || get(files, 'pages/index.ts') || get(files, 'pages/index.js') ||
-      get(files, 'src/pages/index.tsx') || get(files, 'src/pages/index.jsx') || get(files, 'src/pages/index.ts') || get(files, 'src/pages/index.js')
+      get(projectFiles, 'pages/index.tsx') || get(projectFiles, 'pages/index.jsx') || get(projectFiles, 'pages/index.ts') || get(projectFiles, 'pages/index.js') ||
+      get(projectFiles, 'src/pages/index.tsx') || get(projectFiles, 'src/pages/index.jsx') || get(projectFiles, 'src/pages/index.ts') || get(projectFiles, 'src/pages/index.js')
     );
     if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx or pages/index.tsx. Nexa will not create a fake placeholder homepage.');
-    const hasAppRouterPage = Boolean(get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js') || get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js'));
+    const hasAppRouterPage = Boolean(get(projectFiles, 'app/page.tsx') || get(projectFiles, 'app/page.jsx') || get(projectFiles, 'app/page.ts') || get(projectFiles, 'app/page.js') || get(projectFiles, 'src/app/page.tsx') || get(projectFiles, 'src/app/page.jsx') || get(projectFiles, 'src/app/page.ts') || get(projectFiles, 'src/app/page.js'));
     const hasLayout = Boolean(
-      get(files, 'app/layout.tsx') || get(files, 'app/layout.jsx') || get(files, 'app/layout.ts') || get(files, 'app/layout.js') ||
-      get(files, 'src/app/layout.tsx') || get(files, 'src/app/layout.jsx') || get(files, 'src/app/layout.ts') || get(files, 'src/app/layout.js')
+      get(projectFiles, 'app/layout.tsx') || get(projectFiles, 'app/layout.jsx') || get(projectFiles, 'app/layout.ts') || get(projectFiles, 'app/layout.js') ||
+      get(projectFiles, 'src/app/layout.tsx') || get(projectFiles, 'src/app/layout.jsx') || get(projectFiles, 'src/app/layout.ts') || get(projectFiles, 'src/app/layout.js')
     );
     if (hasAppRouterPage && !hasLayout) {
       throw new ProjectCompletenessError('App Router generation requires app/layout.tsx or src/app/layout.tsx.');
