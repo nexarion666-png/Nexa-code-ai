@@ -83,22 +83,22 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     setInput(''); setError(''); setKeysExhausted(null); setSwitchingProvider(''); setStreaming(true);
     const userMessage: Message = { role: 'user', content: text, created_at: new Date().toISOString() };
     const assistantMessage: Message = { role: 'assistant', content: '', created_at: new Date().toISOString() };
+    let assistantText = '';
+    let shouldBuildInAgent = false;
     setMessages(prev => [...prev, userMessage, assistantMessage]);
     try {
       const response = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({projectId,message:text,history,provider:'cleanapis',mode:activeMode}) });
       if (!response.ok || !response.body) { const data=await response.json().catch(()=>({})); throw new Error(data.message || data.error || 'Nexa could not start the conversation.'); }
       const reader=response.body.getReader(); const decoder=new TextDecoder(); const parser=sseParser(); let done=false;
       while(!done){ const {value,done:readDone}=await reader.read(); if(readDone) break; const events=parser.push(decoder.decode(value,{stream:true})); for(const event of events){
-        if(event.type==='chunk'){ window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:switchingProvider==='groq'?'fallback':'primary'})); } if(event.type==='chunk') setMessages(prev=>{const copy=[...prev]; const last=copy[copy.length-1]; if(last?.role==='assistant') copy[copy.length-1]={...last,content:last.content+event.text}; return copy;});
+        if(event.type==='chunk'){ window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:switchingProvider==='groq'?'fallback':'primary'})); } if(event.type==='chunk') { assistantText += event.text; setMessages(prev=>{const copy=[...prev]; const last=copy[copy.length-1]; if(last?.role==='assistant') copy[copy.length-1]={...last,content:last.content+event.text}; return copy;}); }
         if(event.type==='done'){
           done=true;
           setSwitchingProvider('');
-          // Any concrete edit/fix request must expose the proposal action after
-          // Nexa finishes its analysis, even if the model omits the
-          // [PROPOSAL_READY] marker. The marker is an AI output hint, not a
-          // reliable UI state signal. This keeps Describe -> Proposal working
-          // consistently across repeated fixes.
-          if(event.proposalReady || activeMode === 'agent') setProposalReady(true);
+          // Agent mode immediately starts the build/edit/fix pipeline.
+          // Conversation mode never triggers file generation.
+          if (activeMode === 'agent') shouldBuildInAgent = true;
+          else if (event.proposalReady) setProposalReady(true);
         }
         if(event.type==='switching'){ setSwitchingProvider(event.provider); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:event.provider==='groq'?'fallback':'primary'})); }
         if(event.type==='keys_exhausted'){ setKeysExhausted({tried:event.tried ?? [],message:event.message ?? 'All configured keys are rate-limited or invalid.',retryAfter:event.retryAfter ?? 60}); setError(''); window.dispatchEvent(new CustomEvent('nexa-ai-status',{detail:'exhausted'})); throw new Error('KEYS_EXHAUSTED'); }
@@ -107,7 +107,19 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
         if(event.type==='warning') setError(event.message);
       }}
     } catch(e) { const msg=e instanceof Error?e.message:'Something went wrong.'; if(msg !== 'KEYS_EXHAUSTED') setError(msg); setMessages(prev=>prev[prev.length-1]?.role==='assistant' && !prev[prev.length-1].content ? prev.slice(0,-1) : prev); }
-    finally { setStreaming(false); setSwitchingProvider(''); setTimeout(()=>inputRef.current?.focus(), 50); }
+    finally {
+      setStreaming(false);
+      setSwitchingProvider('');
+      setTimeout(()=>inputRef.current?.focus(), 50);
+    }
+    if (shouldBuildInAgent) {
+      const completedHistory = [
+        ...history,
+        userMessage,
+        { role: 'assistant' as const, content: assistantText, created_at: new Date().toISOString() },
+      ];
+      await generateProposal(completedHistory);
+    }
   }
 
   function sendPromptToAgent(prompt: string) {
@@ -117,16 +129,16 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
   }
 
   function sendCompletionReportToConversation() {
-    const report = `Agent task status\nProposal ID: ${proposalId || 'not generated'}\nFiles proposed: ${changesCount}\nStatus: Changes are prepared for review; they have not been applied yet.\nPlease continue planning based on this status and suggest the next step.`;
+    const report = `Agent task status\nTask ID: ${proposalId || 'not generated'}\nFiles proposed: ${changesCount}\nStatus: Changes are prepared for review; they have not been applied yet.\nPlease continue planning based on this status and suggest the next step.`;
     setMode('conversation');
     void send(report, 'conversation');
   }
 
-  async function generateProposal() {
-    if (generating || streaming || (!proposalReady && mode !== 'agent')) return;
+  async function generateProposal(historyOverride?: { role: 'user' | 'assistant'; content: string }[]) {
+    if (generating || (streaming && !historyOverride) || (!historyOverride && !proposalReady && mode !== 'agent')) return;
     setGenerating(true); setError('');
     try {
-      const response = await fetch('/api/generate-proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId, history }) });
+      const response = await fetch('/api/generate-proposal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId, history: historyOverride ?? history }) });
       const raw = await response.text();
       let data: { proposalId?: string; changesCount?: number; error?: string; message?: string } = {};
 
@@ -135,15 +147,15 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
           data = JSON.parse(raw);
         } catch {
           const detail = raw.replace(/\s+/g, ' ').trim();
-          throw new Error(detail || `Generate Proposal returned an invalid response (HTTP ${response.status}).`);
+          throw new Error(detail || `Agent build returned an invalid response (HTTP ${response.status}).`);
         }
       }
 
       if (!response.ok) {
-        throw new Error(data.error || data.message || `Generate Proposal failed (HTTP ${response.status}).`);
+        throw new Error(data.error || data.message || `Agent build failed (HTTP ${response.status}).`);
       }
       if (!data.proposalId) {
-        throw new Error('Generate Proposal returned an incomplete response. Please try again.');
+        throw new Error('Agent did not return a completed set of file changes. Please try again.');
       }
 
       const summary = `Proposal ready: ${data.changesCount ?? 0} ${(data.changesCount ?? 0) === 1 ? 'file' : 'files'} to modify.`;
@@ -191,7 +203,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     </div>}
     {switchingProvider && <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 px-4 py-3 text-xs text-violet-200">Nexa is switching providers… trying {switchingProvider} next.</div>}
     {error && <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs leading-5 text-amber-200">{error}</div>}
-    {proposalReady && <button onClick={generateProposal} disabled={generating} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-400/50 bg-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_0_24px_rgba(139,92,246,.35)]">{generating ? <Loader2 size={17} className="animate-spin"/> : <GitCompareArrows size={17}/>}Generate Proposal</button>}
+    {generating && <div className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-400/50 bg-violet-600/20 px-4 py-3 text-sm font-semibold text-violet-100"><Loader2 size={17} className="animate-spin"/>Agent is building, editing, or fixing your project…</div>}
     {proposalId && changesCount > 0 && <><button onClick={onReviewChanges} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-violet-500/40 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-200"><GitCompareArrows size={17}/>Review Changes · {changesCount}</button><button onClick={sendCompletionReportToConversation} disabled={streaming || generating} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-700 bg-zinc-900/70 px-4 py-2.5 text-xs font-semibold text-zinc-300 disabled:opacity-40">↩ Send status report to Conversation</button></>}
     <div ref={endRef}/>
 
