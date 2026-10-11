@@ -21,6 +21,6 @@ export async function POST(request: Request) {
   try { result = raw ? JSON.parse(raw) as typeof result : {}; } catch { result = { message: raw }; }
   if(!response.ok)return NextResponse.json({error:result?.error?.message||result?.message||`Vercel deployment failed (${response.status}).`},{status:response.status>=400&&response.status<500?response.status:502});
   const url=result.url?(String(result.url).startsWith('http')?String(result.url):`https://${result.url}`):null;
-  const {data:deployment,error:ie}=await supabase.from('deployments').insert({project_id:projectId,user_id:user.id,url,status:result.readyState||'READY',vercel_deployment_id:result.id??null}).select('id,url,status,vercel_deployment_id,created_at').single();
+  const {data:deployment,error:ie}=await supabase.from('deployments').insert({project_id:projectId,user_id:user.id,url,status:result.readyState||'QUEUED',vercel_deployment_id:result.id??null}).select('id,url,status,vercel_deployment_id,created_at').single();
   if(ie)return NextResponse.json({error:ie.message},{status:500}); return NextResponse.json({url,id:result.id,deployment});
 }

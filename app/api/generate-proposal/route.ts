@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import ts from 'typescript';
 import { createClient } from '@/lib/supabase/server';
 import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
@@ -43,6 +44,32 @@ function parseFiles(content: string) {
   return files;
 }
 
+// TypeScript's parser catches malformed JSX/TSX before a proposal can be saved.
+// This is deliberately a syntax check, not a replacement for the real Vercel build.
+function validateGeneratedSyntax(files: { path: string; content: string }[]) {
+  const sourceExtensions = /\.(?:tsx?|jsx?)$/i;
+  for (const file of files) {
+    if (!sourceExtensions.test(file.path)) continue;
+    const result = ts.transpileModule(file.content, {
+      fileName: file.path,
+      reportDiagnostics: true,
+      compilerOptions: {
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2020,
+        module: ts.ModuleKind.ESNext,
+        isolatedModules: true,
+      },
+    });
+    const diagnostic = (result.diagnostics ?? []).find(item => item.category === ts.DiagnosticCategory.Error);
+    if (!diagnostic) continue;
+    const position = diagnostic.file && diagnostic.start !== undefined
+      ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+      : null;
+    const where = position ? `:${position.line + 1}:${position.character + 1}` : '';
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ');
+    throw new Error(`Generated file ${file.path}${where} has a TypeScript/JSX syntax error: ${message}`);
+  }
+}
 
 async function repairGeneratedProject({
   provider,
@@ -59,9 +86,10 @@ async function repairGeneratedProject({
 }) {
   // Repair must be a small, focused request. Re-sending the original generation
   // history + every existing project file can exceed provider TPM/credit limits.
-  const missingImportMatch = validationError.match(/Generated file\s+([^\s]+)\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
+  const missingImportMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
+  const syntaxMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+has a TypeScript\/JSX syntax error/i);
   const missingFileMatch = validationError.match(/(?:requires|missing|Missing)\s+(?:file\s+)?([^\s,.]+\.(?:tsx?|jsx?|json|css|md))/i);
-  const relevantPath = missingImportMatch?.[1] || missingFileMatch?.[1] || '';
+  const relevantPath = missingImportMatch?.[1] || syntaxMatch?.[1] || missingFileMatch?.[1] || '';
   const missingSpecifier = missingImportMatch?.[2] || '';
   const impliedModulePath = missingSpecifier.startsWith('@/') ? missingSpecifier.slice(2) : '';
   const relevant = currentFiles.filter(file =>
@@ -82,6 +110,8 @@ async function repairGeneratedProject({
     role: 'user',
     content: missingImportMatch
       ? `Fix this missing import only. The file ${missingImportMatch[1]} imports ${missingSpecifier}. Create the real module at the path implied by tsconfig.json (for @/components/CartDrawer, use components/CartDrawer.tsx or the appropriate existing extension). Infer the component's props and behavior from the importing file and relevant project context. Do not regenerate the importing page unless it is genuinely necessary. Output only the missing/changed complete FILE block(s):\n---FILE: path/to/file.tsx---\nfull file content`
+      : syntaxMatch
+        ? `Repair the TypeScript/JSX syntax error in ${syntaxMatch[1]} only. The exact compiler diagnostic is: ${validationError}. Inspect the complete current file and return a syntactically valid complete replacement for that file. Preserve its design, content, and behavior; do not rewrite unrelated files. Output only this complete file block:\n---FILE: ${syntaxMatch[1]}---\nfull corrected file content`
       : needsProjectShell
         ? `Complete the required Next.js project shell in ONE repair response. Inspect the CURRENT FILES and create every missing required file in this same response: package.json with Next.js and all packages imported by generated files, a real app/page.tsx (or pages/index.tsx if the project uses Pages Router), and app/layout.tsx when using App Router. Preserve the existing design and feature requirements; do not create a fake placeholder homepage. Do not repeat files that already exist unless they need a compatible update. Output only complete FILE blocks.`
         : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
@@ -203,6 +233,7 @@ export async function POST(request: Request) {
   for (let repairAttempt = 0; repairAttempt < 2; repairAttempt++) {
     try {
       files = ensureCompleteNextProject(files, { existingFiles: existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })) });
+      validateGeneratedSyntax(files);
       validationError = '';
       break;
     } catch (error) {
