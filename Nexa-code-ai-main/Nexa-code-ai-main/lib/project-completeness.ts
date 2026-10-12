@@ -18,7 +18,7 @@ function normalizePath(path: string) {
 }
 
 function isPathSafe(path: string) {
-  return Boolean(path) && !path.split('/').some(part => part === '..') && !path.includes('\\') && !path.startsWith('/');
+  return Boolean(path) && !path.includes('..') && !path.includes('\\') && !path.startsWith('/');
 }
 
 function dedupeLast(files: ProjectFile[]) {
@@ -48,29 +48,6 @@ function looksLikeNextProject(files: ProjectFile[]) {
     }
   }
   return files.some(file => /^app\/(layout|page)\.(tsx?|jsx?)$/.test(file.path) || /^pages\/(index|_app)\.(tsx?|jsx?)$/.test(file.path));
-}
-
-function normalizeEncodedManifest(files: ProjectFile[]) {
-  const packageFile = get(files, 'package.json');
-  if (!packageFile) return;
-  try {
-    JSON.parse(packageFile.content);
-    return;
-  } catch {
-    // Some model responses accidentally put base64-encoded JSON into package.json.
-    // Decode only when the entire payload is valid base64 and decodes to a JSON object.
-    const encoded = packageFile.content.trim();
-    if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return;
-    try {
-      const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-      const parsed = JSON.parse(decoded);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        packageFile.content = `${JSON.stringify(parsed, null, 2)}\n`;
-      }
-    } catch {
-      // Leave invalid manifests untouched so validation reports the real failure.
-    }
-  }
 }
 
 function validateJson(files: ProjectFile[]) {
@@ -159,86 +136,49 @@ function validateLocalImports(files: ProjectFile[], existingFiles: ProjectFile[]
   }
 }
 
-// Known runtime packages commonly emitted by Next.js app builders. Pinning a
-// compatible major range lets Nexa repair the manifest deterministically instead
-// of spending another model call on a dependency that can be inferred safely.
-const KNOWN_PACKAGE_RANGES: Record<string, string> = {
-  clsx: '^2.1.1',
-  'tailwind-merge': '^2.6.0',
-  'class-variance-authority': '^0.7.1',
-  'lucide-react': '^0.468.0',
-  zod: '^3.24.1',
-  'react-hook-form': '^7.54.2',
-  '@hookform/resolvers': '^3.9.1',
-  'date-fns': '^4.1.0',
-  recharts: '^2.15.0',
-  sonner: '^1.7.1',
-  'framer-motion': '^11.15.0',
-  'react-icons': '^5.4.0',
-  zustand: '^5.0.2',
-  'lucide': '^0.468.0',
-  '@radix-ui/react-dialog': '^1.1.4',
-  '@radix-ui/react-slot': '^1.1.1',
-  '@radix-ui/react-dropdown-menu': '^2.1.4',
-  '@radix-ui/react-tabs': '^1.1.2',
-  '@radix-ui/react-label': '^2.1.1',
-  '@radix-ui/react-select': '^2.1.4',
-  '@radix-ui/react-separator': '^1.1.1',
-  '@radix-ui/react-avatar': '^1.1.2',
-  '@radix-ui/react-checkbox': '^1.1.3',
-  '@radix-ui/react-switch': '^1.1.2',
-};
-
-function packageNameFromSpecifier(specifier: string) {
-  return specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
-}
-
 function validatePackage(files: ProjectFile[]) {
   const packageFile = get(files, 'package.json');
   if (!packageFile) return;
-  let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string>; [key: string]: unknown };
+  let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
   try {
     pkg = JSON.parse(packageFile.content);
   } catch {
-    throw new ProjectCompletenessError('package.json is not valid JSON. Nexa will repair the manifest before saving.');
+    return;
   }
-  pkg.dependencies ??= {};
-  pkg.devDependencies ??= {};
-  const deps = new Set([...Object.keys(pkg.dependencies), ...Object.keys(pkg.devDependencies)]);
-  const builtin = new Set(['fs', 'path', 'url', 'crypto', 'http', 'https', 'os', 'stream', 'util', 'events', 'buffer', 'assert', 'child_process', 'zlib', 'net', 'tls', 'module', 'querystring', 'string_decoder', 'timers', 'worker_threads', 'dns', 'readline', 'tty', 'vm', 'perf_hooks', 'async_hooks', 'console', 'process']);
-  const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\s*\(|import\s*\()(['"])([^'"]+)\1/g;
-  const missingKnown = new Set<string>();
+  const deps = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]);
+  const builtin = new Set(['fs', 'path', 'url', 'crypto', 'http', 'https', 'os', 'stream', 'util', 'events', 'buffer', 'assert', 'child_process', 'zlib', 'net', 'tls', 'module', 'querystring', 'string_decoder', 'timers', 'worker_threads']);
+  const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|require\()(['"])([^'"./@][^'"]*|@[^/]+\/[^'"]+)\1/g;
   for (const file of files) {
     importPattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = importPattern.exec(file.content)) !== null) {
       const specifier = match[2];
-      if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('@/')) continue;
-      const packageName = packageNameFromSpecifier(specifier);
-      if (builtin.has(packageName.replace(/^node:/, '')) || deps.has(packageName)) continue;
-      if (KNOWN_PACKAGE_RANGES[packageName]) missingKnown.add(packageName);
-      else throw new ProjectCompletenessError(`Generated file ${file.path} imports ${packageName}, but package.json does not declare it. Add a compatible dependency or correct the import.`);
+      const packageName = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
+      if (!builtin.has(packageName) && !deps.has(packageName)) {
+        throw new ProjectCompletenessError(`Generated file ${file.path} imports ${packageName}, but package.json does not declare it.`);
+      }
     }
-  }
-  if (missingKnown.size) {
-    for (const name of Array.from(missingKnown)) pkg.dependencies[name] = KNOWN_PACKAGE_RANGES[name];
-    packageFile.content = `${JSON.stringify(pkg, null, 2)}\n`;
   }
 }
 
 export function ensureCompleteNextProject(input: ProjectFile[], options: { requireShell?: boolean; existingFiles?: ProjectFile[] } = {}) {
   const files = dedupeLast(input);
   if (!files.length) throw new ProjectCompletenessError('Nexa returned no files.');
-  if (!looksLikeNextProject(files)) return files;
 
-  normalizeEncodedManifest(files);
+  // A proposal usually contains only changed files. Treat the persisted project as
+  // part of the project when detecting its framework and validating the required
+  // Next.js shell, but validate generated JSON/dependencies only on files being changed.
+  const existingFiles = dedupeLast(options.existingFiles ?? []);
+  const projectFiles = dedupeLast([...existingFiles, ...files]);
+  if (!looksLikeNextProject(projectFiles)) return files;
+
   validateJson(files);
   validateContents(files);
   validatePackage(files);
-  validateLocalImports(files, options.existingFiles ?? []);
+  validateLocalImports(files, existingFiles);
 
   const requireShell = options.requireShell ?? true;
-  const packageFile = get(files, 'package.json');
+  const packageFile = get(projectFiles, 'package.json');
   if (requireShell) {
     if (!packageFile) throw new ProjectCompletenessError('Complete Next.js generation requires package.json.');
     let pkg: { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
@@ -246,18 +186,18 @@ export function ensureCompleteNextProject(input: ProjectFile[], options: { requi
     if (!pkg.dependencies?.next && !pkg.devDependencies?.next) throw new ProjectCompletenessError('package.json does not declare Next.js.');
 
     const hasAppPage = Boolean(
-      get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js') ||
-      get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js')
+      get(projectFiles, 'app/page.tsx') || get(projectFiles, 'app/page.jsx') || get(projectFiles, 'app/page.ts') || get(projectFiles, 'app/page.js') ||
+      get(projectFiles, 'src/app/page.tsx') || get(projectFiles, 'src/app/page.jsx') || get(projectFiles, 'src/app/page.ts') || get(projectFiles, 'src/app/page.js')
     );
     const hasPagesIndex = Boolean(
-      get(files, 'pages/index.tsx') || get(files, 'pages/index.jsx') || get(files, 'pages/index.ts') || get(files, 'pages/index.js') ||
-      get(files, 'src/pages/index.tsx') || get(files, 'src/pages/index.jsx') || get(files, 'src/pages/index.ts') || get(files, 'src/pages/index.js')
+      get(projectFiles, 'pages/index.tsx') || get(projectFiles, 'pages/index.jsx') || get(projectFiles, 'pages/index.ts') || get(projectFiles, 'pages/index.js') ||
+      get(projectFiles, 'src/pages/index.tsx') || get(projectFiles, 'src/pages/index.jsx') || get(projectFiles, 'src/pages/index.ts') || get(projectFiles, 'src/pages/index.js')
     );
     if (!hasAppPage && !hasPagesIndex) throw new ProjectCompletenessError('Complete generation requires app/page.tsx or pages/index.tsx. Nexa will not create a fake placeholder homepage.');
-    const hasAppRouterPage = Boolean(get(files, 'app/page.tsx') || get(files, 'app/page.jsx') || get(files, 'app/page.ts') || get(files, 'app/page.js') || get(files, 'src/app/page.tsx') || get(files, 'src/app/page.jsx') || get(files, 'src/app/page.ts') || get(files, 'src/app/page.js'));
+    const hasAppRouterPage = Boolean(get(projectFiles, 'app/page.tsx') || get(projectFiles, 'app/page.jsx') || get(projectFiles, 'app/page.ts') || get(projectFiles, 'app/page.js') || get(projectFiles, 'src/app/page.tsx') || get(projectFiles, 'src/app/page.jsx') || get(projectFiles, 'src/app/page.ts') || get(projectFiles, 'src/app/page.js'));
     const hasLayout = Boolean(
-      get(files, 'app/layout.tsx') || get(files, 'app/layout.jsx') || get(files, 'app/layout.ts') || get(files, 'app/layout.js') ||
-      get(files, 'src/app/layout.tsx') || get(files, 'src/app/layout.jsx') || get(files, 'src/app/layout.ts') || get(files, 'src/app/layout.js')
+      get(projectFiles, 'app/layout.tsx') || get(projectFiles, 'app/layout.jsx') || get(projectFiles, 'app/layout.ts') || get(projectFiles, 'app/layout.js') ||
+      get(projectFiles, 'src/app/layout.tsx') || get(projectFiles, 'src/app/layout.jsx') || get(projectFiles, 'src/app/layout.ts') || get(projectFiles, 'src/app/layout.js')
     );
     if (hasAppRouterPage && !hasLayout) {
       throw new ProjectCompletenessError('App Router generation requires app/layout.tsx or src/app/layout.tsx.');

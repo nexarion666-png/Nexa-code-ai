@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  background: #09090b;
+  color: #f4f4f5;
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+
+.nexa-shell {
+  width: 100%;
+  min-height: 100svh;
+  margin: 0 auto;
+  position: relative;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 18% 3%, rgba(139,92,246,.11), transparent 26%),
+    radial-gradient(circle at 92% 22%, rgba(59,130,246,.07), transparent 24%),
+    #09090b;
+}
+
+.glass {
+  background: rgba(24,24,27,.78);
+  border: 1px solid #27272a;
+  backdrop-filter: blur(18px);
+}
+
+.scrollbar-none::-webkit-scrollbar { display: none; }
+.scrollbar-none { scrollbar-width: none; }
+
+.text-gradient {
+  background: linear-gradient(90deg, #fff 0%, #a78bfa 62%, #6366f1 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@media (display-mode: standalone) { .pwa-bottom-nav { display: none !important; } }
+.tool-card { border: 1px solid #262626; background: #141414; border-radius: 1rem; padding: 1.25rem; transition: border-color .2s ease, transform .2s ease; }
+.tool-card:hover { border-color: #333; transform: translateY(-1px); }

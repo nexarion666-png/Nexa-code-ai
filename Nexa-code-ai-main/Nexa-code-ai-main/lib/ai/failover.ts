@@ -2,7 +2,7 @@ export type Provider = 'cleanapis' | 'gemini' | 'groq' | 'openrouter';
 export type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export const MODELS: Record<Provider, readonly string[]> = {
-  // cleanapis is the primary provider. Keep the list to models shown in the user's catalogue.
+  // Clean APIs is the primary provider. Start with the model verified by the user's streaming test.
   cleanapis: ['gemini-3.7-flash', 'deepseek-v4-flash-0731', 'claude-sonnet-5'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3-flash-preview'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
@@ -89,28 +89,34 @@ async function assertOk(response: Response, provider: Provider): Promise<void> {
   // response. Never treat that page as an empty successful model response.
   if (provider === 'cleanapis' && contentType.includes('text/html')) {
     const text = await response.text().catch(() => '');
-    const challenge = /cloudflare|just a moment|cf-chl|challenge-platform/i.test(text);
-    // Diagnostic-only logging: never log authorization headers or the full HTML body.
-    const cfRay = response.headers.get('cf-ray');
-    const cfMitigated = response.headers.get('cf-mitigated');
-    const server = response.headers.get('server');
-    const bodyMarker = text.match(/<title[^>]*>\s*([^<]{1,120})\s*<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim();
-    console.error('[CLEAN APIS UPSTREAM HTML]', JSON.stringify({
+    const challenge = /cloudflare|just a moment|cf-chl|challenge-platform|attention required/i.test(text);
+    // Log only response metadata and a short, sanitized page title. Never log
+    // the Authorization header, API key, or the full upstream HTML body.
+    const rawTitle = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '';
+    const pageTitle = rawTitle
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160) || undefined;
+    console.warn('[CLEAN APIS UPSTREAM HTML]', {
       status: response.status,
       ok: response.ok,
       contentType,
-      server,
-      cfRay: cfRay ? cfRay.slice(0, 100) : null,
-      cfMitigated: cfMitigated ? cfMitigated.slice(0, 100) : null,
-      challenge,
-      bodyMarker: bodyMarker ? bodyMarker.slice(0, 120) : null,
-    }));
+      server: response.headers.get('server') ?? undefined,
+      rayId: response.headers.get('cf-ray') ?? undefined,
+      cfMitigated: response.headers.get('cf-mitigated') ?? undefined,
+      pageTitle,
+      challengeDetected: challenge,
+    });
     throw new ProviderError(
       provider,
       response.ok ? 502 : response.status,
       challenge
-        ? 'cleanapis returned a Cloudflare HTML challenge instead of an API response. Check [CLEAN APIS UPSTREAM HTML] diagnostics and ask cleanapis support to allow server-side API requests.'
-        : 'cleanapis returned HTML instead of a JSON API response. Check [CLEAN APIS UPSTREAM HTML] diagnostics and verify the API endpoint.'
+        ? 'Clean APIs returned a Cloudflare HTML challenge instead of an API response. Verify the endpoint and ask Clean APIs support to allow server-side API requests.'
+        : 'Clean APIs returned HTML instead of a JSON API response. Verify the API endpoint.'
     );
   }
   if (response.ok) return;

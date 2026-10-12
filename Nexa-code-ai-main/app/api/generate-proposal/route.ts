@@ -293,18 +293,6 @@ export async function POST(request: Request) {
       new_content: file.content,
     }));
 
-  // Do not create a misleading successful proposal when the model returned only files
-  // that are byte-for-byte identical to the saved project. This was the source of the
-  // recurring 'zero files to modify' success state.
-  if (changes.length === 0) {
-    await supabase.from('proposals').delete().eq('id', proposal.id);
-    return NextResponse.json({
-      error: 'Nexa generated no changes to the saved project. Include the exact build log and use Build Doctor to request a targeted repair.',
-      code: 'PROPOSAL_NO_CHANGES',
-      changesCount: 0,
-    }, { status: 422 });
-  }
-
   if (changes.length) {
     const { error: changesError } = await supabase.from('file_changes').insert(changes);
     if (changesError) {
