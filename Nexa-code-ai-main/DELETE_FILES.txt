@@ -1,1 +1,0 @@
-supabase/migrations/202610090001_add_codecraft_provider.sql
