@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { decryptApiKey } from '@/lib/ai/crypto';
+import { validateProjectPreflight } from '@/lib/build-validation';
 export const runtime = 'nodejs';
 export async function POST(request: Request) {
   const supabase = await createClient(); const { data:{user} } = await supabase.auth.getUser();
@@ -14,6 +15,14 @@ export async function POST(request: Request) {
   let token:string; try{token=decryptApiKey(cred.vercel_token)}catch{return NextResponse.json({error:'Saved Vercel token is invalid. Reconnect it in settings.'},{status:400});}
   const {data:files,error:fe}=await supabase.from('project_files').select('path,content').eq('project_id',projectId).order('path');
   if(fe)return NextResponse.json({error:fe.message},{status:500}); if(!files?.length)return NextResponse.json({error:'Add some project files before deploying.'},{status:400});
+  try {
+    const preflight = validateProjectPreflight(files.map(file => ({ path: file.path, content: file.content ?? '' })));
+    console.info('[NCA BUILD PREFLIGHT PASSED]', { projectId, filesChecked: preflight.filesChecked, checks: preflight.checks });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Project build preflight failed.';
+    console.warn('[NCA BUILD PREFLIGHT FAILED]', { projectId, message });
+    return NextResponse.json({ error: message, code: 'BUILD_PREFLIGHT_FAILED', deployStarted: false, action: 'Repair the reported issue and run Deploy & Verify Build again.' }, { status: 422 });
+  }
   const payload={name:String(project.name).toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`nexa-${projectId.slice(0,8)}`,files:files.map(f=>({file:f.path,data:f.content ?? ''})),projectSettings:{framework:'nextjs'}};
   const response=await fetch('https://api.vercel.com/v13/deployments',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(payload),cache:'no-store'});
   const raw=await response.text();

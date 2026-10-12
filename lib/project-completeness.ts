@@ -74,7 +74,11 @@ function obviousTruncation(file: ProjectFile) {
 }
 
 function validateContents(files: ProjectFile[]) {
+  const sourceOrConfig = /\.(?:tsx?|jsx?|mjs|cjs|json)$/i;
   for (const file of files) {
+    // Documentation and arbitrary text assets may legitimately contain examples
+    // or end with punctuation that resembles a truncated source file.
+    if (!sourceOrConfig.test(file.path)) continue;
     if (obviousTruncation(file)) throw new ProjectCompletenessError(`Generated file ${file.path} is empty or appears truncated.`);
     if (/^```[\w-]*\s*$/m.test(file.content)) throw new ProjectCompletenessError(`Generated file ${file.path} contains an unfinished code fence.`);
   }
@@ -125,6 +129,7 @@ function validateLocalImports(files: ProjectFile[], existingFiles: ProjectFile[]
   const aliases = getTsconfigPaths(allFiles);
   const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|export\s+[\s\S]*?\s+from\s+|require\()(['"])([^'"]+)\1/g;
   for (const file of files) {
+    if (!/\.(?:tsx?|jsx?|mjs|cjs)$/i.test(file.path)) continue;
     importPattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = importPattern.exec(file.content)) !== null) {
@@ -149,11 +154,13 @@ function validatePackage(files: ProjectFile[]) {
   const builtin = new Set(['fs', 'path', 'url', 'crypto', 'http', 'https', 'os', 'stream', 'util', 'events', 'buffer', 'assert', 'child_process', 'zlib', 'net', 'tls', 'module', 'querystring', 'string_decoder', 'timers', 'worker_threads']);
   const importPattern = /(?:import\s+(?:[\s\S]*?\s+from\s+|['"])|require\()(['"])([^'"./@][^'"]*|@[^/]+\/[^'"]+)\1/g;
   for (const file of files) {
+    if (!/\.(?:tsx?|jsx?|mjs|cjs)$/i.test(file.path)) continue;
     importPattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = importPattern.exec(file.content)) !== null) {
       const specifier = match[2];
-      const packageName = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
+      const importedName = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
+      const packageName = importedName.startsWith('node:') ? importedName.slice(5) : importedName;
       if (!builtin.has(packageName) && !deps.has(packageName)) {
         throw new ProjectCompletenessError(`Generated file ${file.path} imports ${packageName}, but package.json does not declare it.`);
       }
