@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import ts from 'typescript';
 import { createClient } from '@/lib/supabase/server';
 import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
@@ -7,13 +8,16 @@ import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-co
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
+// Stop starting provider calls well before Vercel kills the function, so the user
+// gets a clean JSON error instead of a 504 FUNCTION_INVOCATION_TIMEOUT.
+const TIME_BUDGET_MS = 270_000;
 
 const SYSTEM = `You are Nexa, senior full-stack dev. Based on conversation, output detailed plan, then output files EXACTLY like:
 ---FILE: app/page.tsx---
 full file content here
 ---FILE: lib/utils.ts---
 content
-List ALL files needed for feature. Production-ready Next.js 14 Tailwind code. No explanation outside file blocks.`;
+List ALL files needed for feature. Every local module you import (e.g. @/components/Foo) MUST also be output as its own file block. Production-ready Next.js 14 Tailwind code. No explanation outside file blocks.`;
 
 const FILE_PATTERN = /---\s*FILE:\s*(.+?)\s*---\s*([\s\S]*?)(?=---\s*FILE:|$)/g;
 
@@ -40,13 +44,41 @@ function parseFiles(content: string) {
   return files;
 }
 
+// TypeScript's parser catches malformed JSX/TSX before a proposal can be saved.
+// This is deliberately a syntax check, not a replacement for the real Vercel build.
+function validateGeneratedSyntax(files: { path: string; content: string }[]) {
+  const sourceExtensions = /\.(?:tsx?|jsx?)$/i;
+  for (const file of files) {
+    if (!sourceExtensions.test(file.path)) continue;
+    const result = ts.transpileModule(file.content, {
+      fileName: file.path,
+      reportDiagnostics: true,
+      compilerOptions: {
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2020,
+        module: ts.ModuleKind.ESNext,
+        isolatedModules: true,
+      },
+    });
+    const diagnostic = (result.diagnostics ?? []).find(item => item.category === ts.DiagnosticCategory.Error);
+    if (!diagnostic) continue;
+    const position = diagnostic.file && diagnostic.start !== undefined
+      ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+      : null;
+    const where = position ? `:${position.line + 1}:${position.character + 1}` : '';
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ');
+    throw new Error(`Generated file ${file.path}${where} has a TypeScript/JSX syntax error: ${message}`);
+  }
+}
 
 async function repairGeneratedProject({
   provider,
   keysByProvider,
   currentFiles,
   validationError,
+  deadline,
 }: {
+  deadline: number;
   provider: Provider;
   keysByProvider: Record<Provider, FailoverKey[]>;
   currentFiles: { path: string; content: string }[];
@@ -54,13 +86,17 @@ async function repairGeneratedProject({
 }) {
   // Repair must be a small, focused request. Re-sending the original generation
   // history + every existing project file can exceed provider TPM/credit limits.
-  const missingImportMatch = validationError.match(/Generated file\s+([^\s]+)\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
+  const missingImportMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
+  const syntaxMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+has a TypeScript\/JSX syntax error/i);
   const missingFileMatch = validationError.match(/(?:requires|missing|Missing)\s+(?:file\s+)?([^\s,.]+\.(?:tsx?|jsx?|json|css|md))/i);
-  const relevantPath = missingImportMatch?.[1] || missingFileMatch?.[1] || '';
+  const relevantPath = missingImportMatch?.[1] || syntaxMatch?.[1] || missingFileMatch?.[1] || '';
+  const missingSpecifier = missingImportMatch?.[2] || '';
+  const impliedModulePath = missingSpecifier.startsWith('@/') ? missingSpecifier.slice(2) : '';
   const relevant = currentFiles.filter(file =>
     file.path === 'package.json' ||
     file.path === 'tsconfig.json' ||
     file.path === relevantPath ||
+    (impliedModulePath && (file.path === impliedModulePath || file.path.startsWith(impliedModulePath + '/'))) ||
     (relevantPath && file.path.startsWith(relevantPath.replace(/\/[^/]+$/, '') + '/')) ||
     /(^|\/)(layout|page|utils|types|index)\.(tsx?|jsx?)$/.test(file.path),
   ).slice(0, 12);
@@ -69,14 +105,21 @@ async function repairGeneratedProject({
     role: 'system',
     content: `You are Nexa's focused project-repair agent. Fix ONLY the validation failure below. Do not redesign the project. Do not replace valid files. Do not create fake placeholders. Output ONLY complete FILE blocks. Keep the existing framework, aliases, and conventions.\n\nVALIDATION ERROR:\n${validationError}\n\nRELEVANT CURRENT FILES:\n${context || '(none)'}`,
   };
+  const needsProjectShell = /requires package\.json|requires app\/page\.tsx or pages\/index\.tsx|requires app\/layout\.tsx/i.test(validationError);
   const repairUser: AIMessage = {
     role: 'user',
-    content: `Create every real file required to resolve this validation error. If an import such as @/types is missing, create the correct module at the path implied by tsconfig.json and the importing code. Preserve compatibility with the current project. Output only:\n---FILE: path/to/file.tsx---\nfull file content`,
+    content: missingImportMatch
+      ? `Fix this missing import only. The file ${missingImportMatch[1]} imports ${missingSpecifier}. Create the real module at the path implied by tsconfig.json (for @/components/CartDrawer, use components/CartDrawer.tsx or the appropriate existing extension). Infer the component's props and behavior from the importing file and relevant project context. Do not regenerate the importing page unless it is genuinely necessary. Output only the missing/changed complete FILE block(s):\n---FILE: path/to/file.tsx---\nfull file content`
+      : syntaxMatch
+        ? `Repair the TypeScript/JSX syntax error in ${syntaxMatch[1]} only. The exact compiler diagnostic is: ${validationError}. Inspect the complete current file and return a syntactically valid complete replacement for that file. Preserve its design, content, and behavior; do not rewrite unrelated files. Output only this complete file block:\n---FILE: ${syntaxMatch[1]}---\nfull corrected file content`
+      : needsProjectShell
+        ? `Complete the required Next.js project shell in ONE repair response. Inspect the CURRENT FILES and create every missing required file in this same response: package.json with Next.js and all packages imported by generated files, a real app/page.tsx (or pages/index.tsx if the project uses Pages Router), and app/layout.tsx when using App Router. Preserve the existing design and feature requirements; do not create a fake placeholder homepage. Do not repeat files that already exist unless they need a compatible update. Output only complete FILE blocks.`
+        : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
   };
 
-  // Prefer a different provider for repair when the original provider just failed;
-  // streamWithFailover will still fall through all configured providers.
-  const repairProvider: Provider = provider === 'cleanapis' ? 'gemini' : 'cleanapis';
+  // Repair with the provider that just produced the generation successfully;
+  // streamWithFailover still falls through the others if it fails.
+  const repairProvider: Provider = provider;
   let repaired = '';
   await streamWithFailover({
     provider: repairProvider,
@@ -84,12 +127,14 @@ async function repairGeneratedProject({
     keys: keysByProvider[repairProvider] ?? [],
     keysByProvider,
     mode: 'repair',
+    deadline,
     onChunk: async chunk => { repaired += chunk; },
   });
   return parseFiles(repaired);
 }
 
 export async function POST(request: Request) {
+  const deadline = Date.now() + TIME_BUDGET_MS;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -150,15 +195,18 @@ export async function POST(request: Request) {
   ];
 
   let generated = '';
+  let usedProvider: Provider = provider;
   try {
-    await streamWithFailover({
+    const used = await streamWithFailover({
       provider,
       messages,
       keys: failoverKeysByProvider[provider].map(key => key.value),
       keysByProvider: failoverKeysByProvider,
       mode: 'generation',
+      deadline,
       onChunk: async chunk => { generated += chunk; },
     });
+    usedProvider = used.provider;
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     if (raw.startsWith('KEYS_EXHAUSTED::')) {
@@ -185,6 +233,7 @@ export async function POST(request: Request) {
   for (let repairAttempt = 0; repairAttempt < 2; repairAttempt++) {
     try {
       files = ensureCompleteNextProject(files, { existingFiles: existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })) });
+      validateGeneratedSyntax(files);
       validationError = '';
       break;
     } catch (error) {
@@ -194,9 +243,14 @@ export async function POST(request: Request) {
         console.error('[NEXA PROPOSAL VALIDATION ERROR]', validationError);
         return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: 2 }, { status: 422 });
       }
+      if (deadline - Date.now() < 40_000) {
+        console.error('[NEXA PROPOSAL REPAIR SKIPPED] not enough time left');
+        return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', message: 'Ran out of time repairing the proposal. Try again, or ask Nexa for a smaller feature.' }, { status: 422 });
+      }
       try {
         const repairedFiles = await repairGeneratedProject({
-          provider,
+          deadline,
+          provider: usedProvider,
           keysByProvider: failoverKeysByProvider,
           currentFiles: [
             ...existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })),
@@ -238,6 +292,18 @@ export async function POST(request: Request) {
       old_content: existingByPath.get(file.path) ?? null,
       new_content: file.content,
     }));
+
+  // Do not create a misleading successful proposal when the model returned only files
+  // that are byte-for-byte identical to the saved project. This was the source of the
+  // recurring 'zero files to modify' success state.
+  if (changes.length === 0) {
+    await supabase.from('proposals').delete().eq('id', proposal.id);
+    return NextResponse.json({
+      error: 'Nexa generated no changes to the saved project. Include the exact build log and use Build Doctor to request a targeted repair.',
+      code: 'PROPOSAL_NO_CHANGES',
+      changesCount: 0,
+    }, { status: 422 });
+  }
 
   if (changes.length) {
     const { error: changesError } = await supabase.from('file_changes').insert(changes);

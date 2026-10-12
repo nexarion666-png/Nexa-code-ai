@@ -165,13 +165,14 @@ export function ensureCompleteNextProject(input: ProjectFile[], options: { requi
   const files = dedupeLast(input);
   if (!files.length) throw new ProjectCompletenessError('Nexa returned no files.');
 
-  // A proposal usually contains only changed files. Treat the persisted project as
-  // part of the project when detecting its framework and validating the required
-  // Next.js shell, but validate generated JSON/dependencies only on files being changed.
-  const existingFiles = dedupeLast(options.existingFiles ?? []);
+  // Validate a proposal in the context of the whole project. Proposals usually
+  // contain only changed files, so the existing package.json/homepage/layout
+  // must count when checking whether this is a complete Next.js project.
+  const existingFiles = options.existingFiles ?? [];
   const projectFiles = dedupeLast([...existingFiles, ...files]);
   if (!looksLikeNextProject(projectFiles)) return files;
 
+  // Only validate generated content. Existing files are context, not new output.
   validateJson(files);
   validateContents(files);
   validatePackage(files);

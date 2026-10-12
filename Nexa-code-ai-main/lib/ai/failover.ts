@@ -16,7 +16,9 @@ const GEMINI_GENERATION_OUTPUT_TOKENS = 12288;
 const GROQ_GENERATION_OUTPUT_TOKENS = 2048;
 const OPENROUTER_GENERATION_OUTPUT_TOKENS = 4096;
 const CLEANAPIS_GENERATION_OUTPUT_TOKENS = 8192;
-const REPAIR_OUTPUT_TOKENS = 2048;
+// Gemini 3.x thinking tokens count against this budget, so 2048 truncated every repair.
+const REPAIR_OUTPUT_TOKENS = 8192;
+const REPAIR_TIMEOUT_MS = 60_000;
 const CHAT_TIMEOUT_MS = 30_000;
 const GENERATION_TIMEOUT_MS = 120_000;
 const MAX_CONTINUATIONS = 2;
@@ -45,6 +47,7 @@ type Attempt = {
   model: string;
   messages: AIMessage[];
   systemPrompt?: string;
+  deadline?: number;
 };
 
 const cooldownUntil: Record<string, number> = {};
@@ -158,11 +161,16 @@ function isTruncationReason(value: unknown): boolean {
 
 async function* callProviderStream(attempt: Attempt, mode: 'chat' | 'generation' | 'repair' = 'chat'): AsyncGenerator<string> {
   const controller = new AbortController();
-  const timeoutMs = (mode === 'generation' || mode === 'repair') ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
-  let timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const baseTimeoutMs = mode === 'repair' ? REPAIR_TIMEOUT_MS : mode === 'generation' ? GENERATION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
+  // Never let one provider call outlive the request's overall time budget.
+  const timeoutMs = () => Math.max(1, Math.min(baseTimeoutMs, (attempt.deadline ?? Infinity) - Date.now()));
+  if (attempt.deadline !== undefined && attempt.deadline - Date.now() < 1000) {
+    throw new ProviderError(attempt.provider, 408, 'Overall request time budget exhausted before provider call.', 'DEADLINE_EXCEEDED');
+  }
+  let timeout = setTimeout(() => controller.abort(), timeoutMs());
   const resetTimeout = () => {
     clearTimeout(timeout);
-    timeout = setTimeout(() => controller.abort(), timeoutMs);
+    timeout = setTimeout(() => controller.abort(), timeoutMs());
   };
   let partial = '';
 
@@ -438,6 +446,7 @@ export async function streamWithFailover({
   keysByProvider,
   onChunk,
   mode = 'chat',
+  deadline,
 }: {
   provider: Provider;
   messages: AIMessage[];
@@ -445,21 +454,27 @@ export async function streamWithFailover({
   keysByProvider?: Record<Provider, FailoverKey[]>;
   onChunk: (chunk: string) => void | Promise<void>;
   mode?: 'chat' | 'generation' | 'repair';
-}): Promise<void> {
+  deadline?: number;
+}): Promise<{ provider: Provider; model: string }> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { cleanapis: [], gemini: [], groq: [], openrouter: [] };
   if (!keysByProvider) allKeys[provider] = normalize(keys);
   if (!allKeys[provider]?.length) throw new Error('AI_UNAVAILABLE::[]::No configured key for requested provider');
 
-  const orderedProviders: Provider[] = [provider, 'cleanapis', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
+  // Repairs must be strictly bounded: use only the provider that generated the files.
+  // Falling through every provider during repair is what turns a missing import into a 300s timeout.
+  const orderedProviders: Provider[] = mode === 'repair'
+    ? [provider]
+    : [provider, 'cleanapis', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
   let lastError = 'All providers failed';
   const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
 
   for (const currentProvider of orderedProviders) {
-    const providerKeys = allKeys[currentProvider] ?? [];
+    // A repair is a small, focused call: one key per provider is enough.
+    const providerKeys = mode === 'repair' ? (allKeys[currentProvider] ?? []).slice(0, 1) : (allKeys[currentProvider] ?? []);
     if (!providerKeys.length) continue;
     if ((cooldownUntil[currentProvider] ?? 0) > Date.now()) continue;
-    const models = modelsFor(currentProvider);
+    const models = mode === 'repair' ? modelsFor(currentProvider).slice(0, 1) : modelsFor(currentProvider);
     const info = { provider: currentProvider, keysTried: 0, modelsTried: [] as string[], lastError: '' };
     const promptChars = messages.reduce((total, message) => total + message.content.length, 0);
     if (mode === 'generation' && currentProvider === 'groq' && promptChars > 14000) {
@@ -477,8 +492,14 @@ export async function streamWithFailover({
       }
       info.keysTried += 1;
       for (const model of models) {
+        if (deadline && Date.now() > deadline - (mode === 'repair' ? 10_000 : 5_000)) {
+          lastError = 'Time budget exhausted before a provider could finish.';
+          info.lastError = lastError;
+          tried.push(info);
+          throw new Error(`AI_UNAVAILABLE::${JSON.stringify(tried)}::${lastError}`);
+        }
         info.modelsTried.push(model);
-        const attempt: Attempt = { provider: currentProvider, key, model, messages };
+        const attempt: Attempt = { provider: currentProvider, key, model, messages, deadline };
         try {
           console.log(`[STREAM TRY] ${currentProvider} ${model} key=${key.id.slice(0, 6)}`);
           let output = '';
@@ -486,13 +507,15 @@ export async function streamWithFailover({
             output = await collectAttempt(attempt, mode);
           } catch (error) {
             if (!(error instanceof ProviderError) || error.code !== 'TRUNCATED_OUTPUT' || !error.partialOutput || mode !== 'generation') throw error;
-            console.warn(`[STREAM CONTINUE] ${currentProvider} ${model} truncated at ${error.partialOutput.length} chars; continuing.`);
-            output = await continueGeneration(attempt, error.partialOutput);
+            // Do not spend another 1–2 provider calls continuing a large, truncated response.
+            // Return the useful partial blocks; proposal validation will request only missing files.
+            console.warn(`[STREAM PARTIAL] ${currentProvider} ${model} truncated at ${error.partialOutput.length} chars; validating partial file blocks instead of retrying continuation.`);
+            output = error.partialOutput;
           }
           if (!output.trim()) throw new ProviderError(currentProvider, 502, 'Provider returned an empty response.', 'EMPTY_OUTPUT');
           await onChunk(output);
           console.log(`[STREAM SUCCESS] ${currentProvider} ${model}`);
-          return;
+          return { provider: currentProvider, model };
         } catch (error) {
           lastError = error instanceof Error ? error.message : String(error);
           info.lastError = lastError;
