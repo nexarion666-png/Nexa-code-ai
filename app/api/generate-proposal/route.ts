@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
-import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
+import { loadUserProviderKeys, loadProviderOrder, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
 import { validateGeneratedSyntax, validateGeneratedTypes } from '@/lib/build-validation';
@@ -25,6 +25,7 @@ function parseFiles(content: string, fallbackPath?: string) {
 async function repairGeneratedProject({
   provider,
   keysByProvider,
+  providerOrder,
   currentFiles,
   validationError,
   deadline,
@@ -32,6 +33,7 @@ async function repairGeneratedProject({
   deadline: number;
   provider: Provider;
   keysByProvider: Record<Provider, FailoverKey[]>;
+  providerOrder: Provider[];
   currentFiles: { path: string; content: string }[];
   validationError: string;
 }) {
@@ -70,8 +72,9 @@ async function repairGeneratedProject({
 
   // Start with the provider that generated the files, then use at most one configured
   // alternate provider if its repair response cannot be parsed.
-  const repairProviders: Provider[] = [provider, ...(['cleanapis', 'gemini', 'groq', 'openrouter'] as Provider[])
-    .filter(candidate => candidate !== provider && (keysByProvider[candidate] ?? []).length > 0)];
+  const repairProviders: Provider[] = [provider, ...providerOrder, 'cleanapis', 'gemini', 'groq', 'openrouter']
+    .filter((candidate, index, all): candidate is Provider => all.indexOf(candidate) === index && candidate !== provider && (keysByProvider[candidate] ?? []).length > 0);
+  repairProviders.unshift(provider);
   const fallbackPath = relevantPath || syntaxMatch?.[1] || '';
   let lastResponse = '';
   let lastProviderError = '';
@@ -130,7 +133,8 @@ export async function POST(request: Request) {
   const usageCheck = await checkUsageLimit(supabase, user, 'proposal');
   if (!usageCheck.allowed) return NextResponse.json({ error: `Daily proposal limit reached (${usageCheck.limit}). Upgrade to Pro for unlimited proposals.`, usage: usageCheck.usage }, { status: 429 });
   const keysByProvider = await loadUserProviderKeys(supabase, user.id);
-  const provider = selectProvider(keysByProvider, requestedProvider);
+  const providerOrder = await loadProviderOrder(supabase, user.id);
+  const provider = selectProvider(keysByProvider, requestedProvider, providerOrder);
   // loadUserProviderKeys returns decrypted string[] values. Normalize them once
   // at the route boundary so the failover engine receives its expected key shape.
   const failoverKeysByProvider: Record<Provider, FailoverKey[]> = {
@@ -180,6 +184,7 @@ export async function POST(request: Request) {
       messages,
       keys: failoverKeysByProvider[provider].map(key => key.value),
       keysByProvider: failoverKeysByProvider,
+      providerOrder,
       mode: 'generation',
       deadline,
       onChunk: async chunk => { generated += chunk; },
@@ -268,6 +273,7 @@ export async function POST(request: Request) {
           deadline,
           provider: usedProvider,
           keysByProvider: failoverKeysByProvider,
+          providerOrder,
           currentFiles: selectedContext.length ? selectedContext : currentProjectFiles.slice(0, 12),
           validationError,
         });

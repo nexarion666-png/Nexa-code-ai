@@ -362,16 +362,16 @@ export function createStreamingFailover({
   messages,
   systemPrompt,
   isChat = false,
+  providerOrder = ['cleanapis', 'gemini', 'groq', 'openrouter'] as Provider[],
 }: {
   requestedProvider?: Provider;
   keysByProvider: Record<string, FailoverKey[]>;
   messages: AIMessage[];
   systemPrompt?: string;
   isChat?: boolean;
+  providerOrder?: Provider[];
 }): ReadableStream<string> {
-  const order: Provider[] = isChat
-    ? [requestedProvider, 'cleanapis', 'groq', 'gemini', 'openrouter']
-    : [requestedProvider, 'cleanapis', 'gemini', 'groq', 'openrouter'];
+  const order: Provider[] = [requestedProvider, ...providerOrder, ...(isChat ? ['cleanapis', 'groq', 'gemini', 'openrouter'] as Provider[] : ['cleanapis', 'gemini', 'groq', 'openrouter'] as Provider[])];
   const uniqueOrder = order.filter((provider, index) => order.indexOf(provider) === index);
 
   return new ReadableStream<string>({
@@ -447,6 +447,7 @@ export async function streamWithFailover({
   onChunk,
   mode = 'chat',
   deadline,
+  providerOrder = ['cleanapis', 'gemini', 'groq', 'openrouter'] as Provider[],
 }: {
   provider: Provider;
   messages: AIMessage[];
@@ -455,6 +456,7 @@ export async function streamWithFailover({
   onChunk: (chunk: string) => void | Promise<void>;
   mode?: 'chat' | 'generation' | 'repair';
   deadline?: number;
+  providerOrder?: Provider[];
 }): Promise<{ provider: Provider; model: string }> {
   const normalize = (items: string[] | FailoverKey[]) => items.map((item, index) => typeof item === 'string' ? { id: `${provider}-${index + 1}`, value: item } : item);
   const allKeys: Record<Provider, FailoverKey[]> = keysByProvider ?? { cleanapis: [], gemini: [], groq: [], openrouter: [] };
@@ -465,7 +467,7 @@ export async function streamWithFailover({
   // Falling through every provider during repair is what turns a missing import into a 300s timeout.
   const orderedProviders: Provider[] = mode === 'repair'
     ? [provider]
-    : [provider, 'cleanapis', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
+    : [provider, ...providerOrder, 'cleanapis', 'gemini', 'groq', 'openrouter'].filter((p, i, arr): p is Provider => arr.indexOf(p) === i) as Provider[];
   let lastError = 'All providers failed';
   const tried: { provider: Provider; keysTried: number; modelsTried: string[]; lastError: string }[] = [];
 

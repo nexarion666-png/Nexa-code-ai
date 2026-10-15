@@ -37,7 +37,7 @@ export function PreviewFrame({ projectId }: { projectId: string }) {
           loading="lazy"
           onLoad={() => setLoading(false)}
           className="h-[58vh] min-h-[420px] w-full border-0 bg-[#0e0e0e]"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
         />
       </div>
     </div>

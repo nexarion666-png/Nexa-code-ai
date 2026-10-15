@@ -4,6 +4,19 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export const PROVIDERS: Provider[] = ['cleanapis', 'gemini', 'groq', 'openrouter'];
 
+export function normalizeProviderOrder(value: unknown): Provider[] {
+  const input = Array.isArray(value) ? value : [];
+  const valid = input.filter((item): item is Provider => typeof item === 'string' && PROVIDERS.includes(item as Provider));
+  return [...new Set([...valid, ...PROVIDERS])];
+}
+
+export async function loadProviderOrder(supabase: SupabaseClient, userId: string): Promise<Provider[]> {
+  const { data, error } = await supabase.from('user_ai_preferences').select('provider_order').eq('user_id', userId).maybeSingle();
+  // Keep older deployments working until the preference migration has been applied.
+  if (error) return [...PROVIDERS];
+  return normalizeProviderOrder(data?.provider_order);
+}
+
 export async function loadUserProviderKeys(supabase: SupabaseClient, userId: string) {
   const { data, error } = await supabase
     .from('user_api_keys')
@@ -27,9 +40,9 @@ export async function loadUserProviderKeys(supabase: SupabaseClient, userId: str
   return keysByProvider;
 }
 
-export function selectProvider(keysByProvider: Record<Provider, string[]>, requested?: string): Provider | null {
+export function selectProvider(keysByProvider: Record<Provider, string[]>, requested?: string, order: Provider[] = PROVIDERS): Provider | null {
   if (requested && PROVIDERS.includes(requested as Provider) && keysByProvider[requested as Provider].length) {
     return requested as Provider;
   }
-  return PROVIDERS.find(provider => keysByProvider[provider].length > 0) ?? null;
+  return normalizeProviderOrder(order).find(provider => keysByProvider[provider].length > 0) ?? null;
 }

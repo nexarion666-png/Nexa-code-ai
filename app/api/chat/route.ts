@@ -4,6 +4,7 @@ import { decryptApiKey } from '@/lib/ai/crypto';
 import { createStreamingFailover, friendlyFailoverError, parseFailoverError, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 import { formatProjectContext } from '@/lib/project-context';
+import { loadProviderOrder } from '@/lib/ai/user-keys';
 
 export const runtime = 'nodejs';
 
@@ -36,8 +37,9 @@ export async function POST(request: Request) {
     if (!(row.provider in keysByProvider)) continue;
     try { keysByProvider[row.provider as Provider].push({ id: String(row.key_name || `key-${keysByProvider[row.provider as Provider].length + 1}`), value: decryptApiKey(row.api_key) }); } catch { /* Ignore an invalid old key. */ }
   }
-  const requestedProvider = String(body.provider || 'cleanapis') as Provider;
-  const provider: Provider = ['cleanapis', 'gemini', 'groq', 'openrouter'].includes(requestedProvider) && keysByProvider[requestedProvider].length ? requestedProvider : (['cleanapis', 'gemini', 'groq', 'openrouter'] as Provider[]).find(p => keysByProvider[p].length > 0) ?? requestedProvider;
+  const providerOrder = await loadProviderOrder(supabase, user.id);
+  const requestedProvider = String(body.provider || providerOrder[0] || 'cleanapis') as Provider;
+  const provider: Provider = ['cleanapis', 'gemini', 'groq', 'openrouter'].includes(requestedProvider) && keysByProvider[requestedProvider].length ? requestedProvider : providerOrder.find(p => keysByProvider[p].length > 0) ?? requestedProvider;
   if (!['cleanapis', 'gemini', 'groq', 'openrouter'].includes(provider)) return NextResponse.json({ error: 'Unsupported provider.' }, { status: 400 });
   if (!keysByProvider[provider].length) return NextResponse.json({ error: 'No AI provider keys are configured. Open AI Settings and add a key.' }, { status: 400 });
 
@@ -89,7 +91,7 @@ export async function POST(request: Request) {
   if (saveUserError) return NextResponse.json({ error: saveUserError.message }, { status: 500 });
 
   const encoder = new TextEncoder();
-  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt, isChat: true });
+  const failoverStream = createStreamingFailover({ requestedProvider: provider, keysByProvider, messages, systemPrompt, isChat: true, providerOrder });
   const reader = failoverStream.getReader();
   let first: ReadableStreamReadResult<string>;
   try {

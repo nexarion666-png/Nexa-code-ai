@@ -87,7 +87,7 @@ export function ChatPanel({ projectId, initialMessages, initialProposal, onPropo
     let shouldBuildInAgent = false;
     setMessages(prev => [...prev, userMessage, assistantMessage]);
     try {
-      const response = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({projectId,message:text,history,provider:'cleanapis',mode:activeMode}) });
+      const response = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({projectId,message:text,history,mode:activeMode}) });
       if (!response.ok || !response.body) { const data=await response.json().catch(()=>({})); throw new Error(data.message || data.error || 'Nexa could not start the conversation.'); }
       const reader=response.body.getReader(); const decoder=new TextDecoder(); const parser=sseParser(); let done=false;
       while(!done){ const {value,done:readDone}=await reader.read(); if(readDone) break; const events=parser.push(decoder.decode(value,{stream:true})); for(const event of events){
