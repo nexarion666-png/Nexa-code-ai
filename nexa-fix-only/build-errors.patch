@@ -1,0 +1,12 @@
+--- a/app/api/repair-build/route.ts
++++ b/app/api/repair-build/route.ts
+@@
+-  return [...result.values()];
++  // Array.from avoids requiring downlevelIteration when the project targets ES5.
++  return Array.from(result.values());
+--- a/lib/build-validation.ts
++++ b/lib/build-validation.ts
+@@
+-    noEmit: true,
+     incremental: false,
+   };
