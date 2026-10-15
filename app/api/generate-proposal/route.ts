@@ -5,6 +5,7 @@ import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
 import { validateGeneratedSyntax, validateGeneratedTypes } from '@/lib/build-validation';
+import { parseGeneratedFileBlocks } from '@/lib/file-blocks';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -19,29 +20,10 @@ full file content here
 content
 List ALL files needed for feature. Every local module you import (e.g. @/components/Foo) MUST also be output as its own file block. Production-ready Next.js 14 Tailwind code. No explanation outside file blocks.`;
 
-const FILE_PATTERN = /---\s*FILE:\s*(.+?)\s*---\s*([\s\S]*?)(?=---\s*FILE:|$)/g;
-
 const GENERATE_NOW = 'The requirements are settled. Do not ask questions and do not write any text outside file blocks. Output the complete set of files now, each starting with a line exactly like ---FILE: path/to/file.tsx--- followed by the full file content.';
 
-function parseFiles(content: string) {
-  const files: { path: string; content: string }[] = [];
-  FILE_PATTERN.lastIndex = 0;
-  const byPath = new Map<string, { path: string; content: string }>();
-  let match: RegExpExecArray | null;
-  while ((match = FILE_PATTERN.exec(content)) !== null) {
-    const path = match[1].trim().replace(/^['"]|['"]$/g, '').replace(/^\/+/, '');
-    const fileContent = match[2]
-      .replace(/^\s*```[\w-]*\r?\n/, '')
-      .replace(/\r?\n?```\s*$/, '')
-      .replace(/^\n/, '')
-      .replace(/\s+$/, '\n');
-    if (!path || path.includes('..') || path.includes('\\')) continue;
-    // Last complete occurrence wins. This prevents an earlier truncated duplicate
-    // from replacing a later complete version of the same file.
-    byPath.set(path, { path, content: fileContent });
-  }
-  byPath.forEach(file => files.push(file));
-  return files;
+function parseFiles(content: string, fallbackPath?: string) {
+  return parseGeneratedFileBlocks(content, fallbackPath);
 }
 
 async function repairGeneratedProject({
@@ -90,20 +72,48 @@ async function repairGeneratedProject({
         : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
   };
 
-  // Repair with the provider that just produced the generation successfully;
-  // streamWithFailover still falls through the others if it fails.
-  const repairProvider: Provider = provider;
-  let repaired = '';
-  await streamWithFailover({
-    provider: repairProvider,
-    messages: [repairSystem, repairUser],
-    keys: keysByProvider[repairProvider] ?? [],
-    keysByProvider,
-    mode: 'repair',
-    deadline,
-    onChunk: async chunk => { repaired += chunk; },
-  });
-  return parseFiles(repaired);
+  // Start with the provider that generated the files, then use at most one configured
+  // alternate provider if its repair response cannot be parsed.
+  const repairProviders: Provider[] = [provider, ...(['cleanapis', 'gemini', 'groq', 'openrouter'] as Provider[])
+    .filter(candidate => candidate !== provider && (keysByProvider[candidate] ?? []).length > 0)];
+  const fallbackPath = relevantPath || syntaxMatch?.[1] || '';
+  let lastResponse = '';
+  let lastProviderError = '';
+  for (let formatAttempt = 0; formatAttempt < 2; formatAttempt++) {
+    let repaired = '';
+    const repairProvider = repairProviders[formatAttempt] ?? provider;
+    const messages = formatAttempt === 0
+      ? [repairSystem, repairUser]
+      : [
+          repairSystem,
+          repairUser,
+          { role: 'user' as const, content: `Your previous response could not be parsed into file blocks. Return the complete corrected source now, with no introduction or explanation. The first line must be exactly ---FILE: ${fallbackPath || 'path/to/file.tsx'}---, followed by the entire file contents. Do not return a diff. Do not return JSON. Do not omit closing JSX tags.` },
+        ];
+    try {
+      await streamWithFailover({
+        provider: repairProvider,
+        messages,
+        keys: keysByProvider[repairProvider] ?? [],
+        keysByProvider,
+        mode: 'repair',
+        deadline,
+        onChunk: async chunk => { repaired += chunk; },
+      });
+    } catch (error) {
+      lastProviderError = error instanceof Error ? error.message : String(error);
+      const safeProviderError = lastProviderError.slice(0, 240).replace(/(?:api[_-]?key|authorization|bearer)\s*[:=]?\s*[^\s,;]+/ig, '[REDACTED]');
+      console.warn(`[NEXA PROPOSAL REPAIR PROVIDER FAILED] attempt=${formatAttempt + 1} provider=${repairProvider}: ${safeProviderError}`);
+      if (formatAttempt === 0 && deadline - Date.now() >= 25_000) continue;
+      break;
+    }
+    lastResponse = repaired;
+    const parsed = parseFiles(repaired, fallbackPath || undefined);
+    if (parsed.length) return parsed;
+    console.warn(`[NEXA PROPOSAL REPAIR PARSE] attempt=${formatAttempt + 1} provider=${repairProvider} responseChars=${repaired.length} hasFileMarker=${/---\s*FILE\s*:/i.test(repaired)} hasJsonShape=${/^[\s\uFEFF]*[\[{]/.test(repaired)} hasCodeFence=${repaired.includes('```')}`);
+    if (formatAttempt === 0 && deadline - Date.now() < 25_000) break;
+  }
+  console.error('[NEXA PROPOSAL REPAIR PARSE FAILED]', JSON.stringify({ responseChars: lastResponse.length, hasFileMarker: /---\s*FILE\s*:/i.test(lastResponse), hasJsonShape: /^[\s\uFEFF]*[\[{]/.test(lastResponse), hasCodeFence: lastResponse.includes('```'), providerError: lastProviderError.slice(0, 240).replace(/(?:api[_-]?key|authorization|bearer)\s*[:=]?\s*[^\s,;]+/ig, '[REDACTED]') }));
+  return [];
 }
 
 export async function POST(request: Request) {

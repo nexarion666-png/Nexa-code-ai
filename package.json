@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test:build-validation": "node scripts/test-build-validation.cjs"
+    "test:build-validation": "node scripts/test-build-validation.cjs",
+    "test:file-blocks": "node scripts/test-file-blocks.cjs",
+    "test:all-validation": "npm run test:build-validation && npm run test:file-blocks"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

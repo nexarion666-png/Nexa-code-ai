@@ -1,0 +1,30 @@
+NEXA CODE AI — PROPOSAL REPAIR PARSING FIX
+
+Apply this ZIP at the root of the existing Nexa Code AI repository. The ZIP contains only changed/new files at their correct repository-relative paths and has no outer project directory.
+
+Files:
+- app/api/generate-proposal/route.ts
+- lib/file-blocks.ts
+- scripts/test-file-blocks.cjs
+- package.json
+
+Fixes:
+1. Adds a shared parser for Nexa's FILE blocks, with support for the established delimiter format, fenced code inside a file block, and strict JSON file-list responses.
+2. During repair only, supports a single fenced source block when the failing file path is known. Initial generation does not guess a file path.
+3. Rejects empty/prose-only responses and unsafe file paths.
+4. Retries once with a stricter output instruction, using one configured alternate provider when available; if no alternate is configured, it retries the original provider.
+5. Logs response shape and bounded, redacted provider diagnostics without dumping full generated source into logs.
+6. Continues to run syntax and cross-file type validation before creating a pending proposal. Failed repair does not create an approval-ready proposal.
+7. Adds parser regression tests and npm run test:all-validation.
+
+Verification performed in the packaging environment:
+- npm run test:build-validation: PASS (8 checks)
+- npm run test:file-blocks: PASS (7 checks)
+- TypeScript transpile syntax checks for app/api/generate-proposal/route.ts and lib/file-blocks.ts: PASS
+- Full npm run build / complete typecheck: NOT RUN. Dependency installation (`npm ci`) timed out in this environment, so run these after applying the patch in your normal development environment.
+
+After applying:
+1. Run npm ci (or your usual dependency install).
+2. Run npm run test:all-validation.
+3. Run npx tsc --noEmit and npm run build.
+4. Deploy NCA and reproduce the failed Hero.tsx repair. Confirm malformed repair output triggers a bounded retry and no proposal is saved unless validation passes.
