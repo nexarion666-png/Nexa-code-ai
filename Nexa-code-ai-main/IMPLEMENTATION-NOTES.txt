@@ -1,0 +1,12 @@
+Nexa Code AI - build repair / zero-change proposal patch
+
+Changes in this patch:
+1. tsconfig.json targets ES2020, so MapIterator values can be spread/iterated during TypeScript checking. The nested archive/patch snapshots are excluded from the active app's TypeScript compilation.
+2. app/api/generate-proposal/route.ts detects recognizable build/compiler logs in recent chat history. If generated output would produce zero changes against saved project_files, it invokes a focused repair request with the compiler output and relevant existing source files.
+3. A zero-change proposal is now rejected before creating a proposal row. The API returns an explicit PROPOSAL_NO_CHANGES or BUILD_REPAIR_NO_CHANGES error instead of telling the user a zero-file proposal is ready.
+4. Build-log repair prompts explicitly require a concrete file edit and prefer the canonical type/data source for property/type errors (for example Shoe.brand), while preserving product data.
+
+Important limitations:
+- This does not autonomously fetch Vercel deployment logs. The build log must be present in recent chat history. Autonomous retrieval requires the Vercel deployment ID/token and a log-fetching integration.
+- This route creates a reviewable proposal; it does not run npm build inside the user's generated project. Vercel deployment verification remains a separate step.
+- A local production build was not verified in this environment: dependency installation timed out. Do not treat this ZIP as build-tested. The reported repair-build/route.ts was not present in the uploaded ZIP; the TypeScript ES target issue is addressed in tsconfig.json.
