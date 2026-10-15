@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:build-validation": "node scripts/test-build-validation.cjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

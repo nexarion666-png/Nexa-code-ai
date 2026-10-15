@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import ts from 'typescript';
 import { createClient } from '@/lib/supabase/server';
 import { streamWithFailover, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { loadUserProviderKeys, selectProvider } from '@/lib/ai/user-keys';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
+import { validateGeneratedSyntax, validateGeneratedTypes } from '@/lib/build-validation';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -44,48 +44,6 @@ function parseFiles(content: string) {
   return files;
 }
 
-function extractBuildFailure(history: AIMessage[]): string | null {
-  // Only inspect recent messages, and require recognizable compiler/build output so
-  // ordinary conversation text is not accidentally treated as a build log.
-  const candidates = history.slice(-20).map(message => message.content);
-  const log = [...candidates].reverse().find(content =>
-    /(?:Failed to compile|Type error:|Module not found|Cannot find module|npm run build|next build|Build failed|Error: Command .* exited with 1|Property ['\"].+ does not exist on type)/i.test(content)
-  );
-  return log ? log.slice(-24_000) : null;
-}
-
-function changedFiles(files: { path: string; content: string }[], existingFiles: { path: string; content: string | null }[]) {
-  const existingByPath = new Map(existingFiles.map(file => [file.path, file.content ?? '']));
-  return files.filter(file => !existingByPath.has(file.path) || existingByPath.get(file.path) !== file.content);
-}
-
-// TypeScript's parser catches malformed JSX/TSX before a proposal can be saved.
-// This is deliberately a syntax check, not a replacement for the real Vercel build.
-function validateGeneratedSyntax(files: { path: string; content: string }[]) {
-  const sourceExtensions = /\.(?:tsx?|jsx?)$/i;
-  for (const file of files) {
-    if (!sourceExtensions.test(file.path)) continue;
-    const result = ts.transpileModule(file.content, {
-      fileName: file.path,
-      reportDiagnostics: true,
-      compilerOptions: {
-        jsx: ts.JsxEmit.ReactJSX,
-        target: ts.ScriptTarget.ES2020,
-        module: ts.ModuleKind.ESNext,
-        isolatedModules: true,
-      },
-    });
-    const diagnostic = (result.diagnostics ?? []).find(item => item.category === ts.DiagnosticCategory.Error);
-    if (!diagnostic) continue;
-    const position = diagnostic.file && diagnostic.start !== undefined
-      ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
-      : null;
-    const where = position ? `:${position.line + 1}:${position.character + 1}` : '';
-    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ');
-    throw new Error(`Generated file ${file.path}${where} has a TypeScript/JSX syntax error: ${message}`);
-  }
-}
-
 async function repairGeneratedProject({
   provider,
   keysByProvider,
@@ -102,13 +60,10 @@ async function repairGeneratedProject({
   // Repair must be a small, focused request. Re-sending the original generation
   // history + every existing project file can exceed provider TPM/credit limits.
   const missingImportMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
-  const syntaxMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+has a TypeScript\/JSX syntax error/i);
+  const syntaxMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+has a TypeScript(?:\/JSX syntax| type) error/i);
   const missingFileMatch = validationError.match(/(?:requires|missing|Missing)\s+(?:file\s+)?([^\s,.]+\.(?:tsx?|jsx?|json|css|md))/i);
-  const compilerPathMatch = validationError.match(/(?:^|\n)\s*(?:\.\/)?((?:app|src|pages|components|lib|data|types)\/[^\s(:]+\.(?:tsx?|jsx?|json|css))\(?\d+(?:,\d+)?\)?/i);
-  const relevantPath = missingImportMatch?.[1] || syntaxMatch?.[1] || missingFileMatch?.[1] || compilerPathMatch?.[1] || '';
+  const relevantPath = missingImportMatch?.[1] || syntaxMatch?.[1] || missingFileMatch?.[1] || '';
   const missingSpecifier = missingImportMatch?.[2] || '';
-  const isBuildLog = /(?:Failed to compile|Type error:|Module not found|npm run build|next build|Property ['\"].+ does not exist on type)/i.test(validationError);
-  const propertyError = validationError.match(/Property ['\"]([^'\"]+)['\"] does not exist on type ['\"]([^'\"]+)['\"]/i);
   const impliedModulePath = missingSpecifier.startsWith('@/') ? missingSpecifier.slice(2) : '';
   const relevant = currentFiles.filter(file =>
     file.path === 'package.json' ||
@@ -116,10 +71,8 @@ async function repairGeneratedProject({
     file.path === relevantPath ||
     (impliedModulePath && (file.path === impliedModulePath || file.path.startsWith(impliedModulePath + '/'))) ||
     (relevantPath && file.path.startsWith(relevantPath.replace(/\/[^/]+$/, '') + '/')) ||
-    (isBuildLog && /(^|\/)(data|types|schema|index)\.(tsx?|jsx?)$/.test(file.path)) ||
-    (propertyError && file.path !== relevantPath && /(^|\/)(data|types|schema)\.(tsx?|jsx?)$/.test(file.path)) ||
     /(^|\/)(layout|page|utils|types|index)\.(tsx?|jsx?)$/.test(file.path),
-  ).slice(0, 24);
+  ).slice(0, 12);
   const context = relevant.map(file => `---CURRENT: ${file.path}---\n${file.content}`).join('\n');
   const repairSystem: AIMessage = {
     role: 'system',
@@ -131,12 +84,10 @@ async function repairGeneratedProject({
     content: missingImportMatch
       ? `Fix this missing import only. The file ${missingImportMatch[1]} imports ${missingSpecifier}. Create the real module at the path implied by tsconfig.json (for @/components/CartDrawer, use components/CartDrawer.tsx or the appropriate existing extension). Infer the component's props and behavior from the importing file and relevant project context. Do not regenerate the importing page unless it is genuinely necessary. Output only the missing/changed complete FILE block(s):\n---FILE: path/to/file.tsx---\nfull file content`
       : syntaxMatch
-        ? `Repair the TypeScript/JSX syntax error in ${syntaxMatch[1]} only. The exact compiler diagnostic is: ${validationError}. Inspect the complete current file and return a syntactically valid complete replacement for that file. Preserve its design, content, and behavior; do not rewrite unrelated files. Output only this complete file block:\n---FILE: ${syntaxMatch[1]}---\nfull corrected file content`
+        ? `Repair the TypeScript syntax/type error in ${syntaxMatch[1]} only. The exact compiler diagnostic is: ${validationError}. Inspect the complete current file and related shared types/interfaces/data models. Fix the underlying contract consistently; do not hide the error with any, ts-ignore, or disabled checks. Preserve design and behavior. Output complete FILE blocks only for files that genuinely need changes.`
       : needsProjectShell
         ? `Complete the required Next.js project shell in ONE repair response. Inspect the CURRENT FILES and create every missing required file in this same response: package.json with Next.js and all packages imported by generated files, a real app/page.tsx (or pages/index.tsx if the project uses Pages Router), and app/layout.tsx when using App Router. Preserve the existing design and feature requirements; do not create a fake placeholder homepage. Do not repeat files that already exist unless they need a compatible update. Output only complete FILE blocks.`
-        : isBuildLog
-          ? `This is a REAL production build/compiler failure, not a request for diagnosis. You MUST return at least one changed complete FILE block that fixes the specific error. Read the compiler path and line/column, inspect the relevant current files, and modify the actual source/type/data file responsible. For errors such as Property 'brand' does not exist on type 'Shoe', fix the canonical Shoe type/data definition and preserve all existing product data; do not change the failing page merely to hide the error unless that is genuinely correct. Do not return unchanged files. If the log identifies a file not present in CURRENT FILES, say so by returning no block only as a last resort. BUILD LOG / ERROR:\n${validationError}\nOutput only complete FILE blocks.`
-          : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
+        : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
   };
 
   // Repair with the provider that just produced the generation successfully;
@@ -252,7 +203,7 @@ export async function POST(request: Request) {
   // repair pass so missing shell files (especially src/app/page.tsx) are generated instead
   // of creating fake placeholders or forcing the user to regenerate manually.
   let validationError = '';
-  for (let repairAttempt = 0; repairAttempt < 2; repairAttempt++) {
+  for (let repairAttempt = 0; repairAttempt < 3; repairAttempt++) {
     try {
       files = ensureCompleteNextProject(files, { existingFiles: existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })) });
       validateGeneratedSyntax(files);
@@ -261,7 +212,7 @@ export async function POST(request: Request) {
     } catch (error) {
       validationError = error instanceof Error ? error.message : String(error);
       console.warn(`[NEXA PROPOSAL REPAIR] attempt=${repairAttempt + 1}: ${validationError}`);
-      if (repairAttempt === 1) {
+      if (repairAttempt === 2) {
         console.error('[NEXA PROPOSAL VALIDATION ERROR]', validationError);
         return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', repairAttempts: 2 }, { status: 422 });
       }
@@ -295,52 +246,6 @@ export async function POST(request: Request) {
     }
   }
 
-  // A successful model response is not a successful repair if it changes no files.
-  // When the recent conversation contains a real build log, force a focused repair pass
-  // before creating a proposal; never present a zero-change proposal as a completed fix.
-  let changes = changedFiles(files, existingFiles);
-  const buildFailure = extractBuildFailure(safeHistory);
-  if (changes.length === 0 && buildFailure) {
-    if (deadline - Date.now() < 45_000) {
-      return NextResponse.json({
-        error: 'The generated proposal made no file changes, and there is not enough time left to safely repair the reported build failure. Try again so Nexa can perform a focused repair.',
-        code: 'BUILD_REPAIR_NO_CHANGES',
-        changesCount: 0,
-      }, { status: 422 });
-    }
-    try {
-      const repairedFiles = await repairGeneratedProject({
-        deadline,
-        provider: usedProvider,
-        keysByProvider: failoverKeysByProvider,
-        currentFiles: existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })),
-        validationError: `Production build failure reported by the user. Fix the actual source file(s), not just diagnose.\n\n${buildFailure}`,
-      });
-      if (!repairedFiles.length) throw new Error('Repair returned no complete file blocks.');
-      const merged = new Map(files.map(file => [file.path, file]));
-      repairedFiles.forEach(file => merged.set(file.path, file));
-      files = Array.from(merged.values());
-      validateGeneratedSyntax(files);
-      changes = changedFiles(files, existingFiles);
-    } catch (repairError) {
-      const detail = repairError instanceof Error ? repairError.message : String(repairError);
-      console.error('[NEXA BUILD REPAIR FAILED]', detail);
-      return NextResponse.json({
-        error: 'Nexa could not produce a valid file change for the reported build failure. No empty proposal was saved.',
-        code: 'BUILD_REPAIR_NO_CHANGES',
-        detail,
-        changesCount: 0,
-      }, { status: 422 });
-    }
-  }
-  if (changes.length === 0) {
-    return NextResponse.json({
-      error: 'Nexa generated no changes to the saved project files. No proposal was saved. Include the exact build log or describe a concrete change and try again.',
-      code: 'PROPOSAL_NO_CHANGES',
-      changesCount: 0,
-    }, { status: 422 });
-  }
-
   generated = serializeFileBlocks(files);
 
   const existingByPath = new Map((existingFiles ?? []).map(file => [file.path, file.content ?? '']));
@@ -351,7 +256,8 @@ export async function POST(request: Request) {
     .single();
   if (proposalError || !proposal) return NextResponse.json({ error: proposalError?.message ?? 'Could not create proposal.' }, { status: 500 });
 
-  const changeRows = changes
+  const changes = files
+    .filter(file => !existingByPath.has(file.path) || existingByPath.get(file.path) !== file.content)
     .map(file => ({
       proposal_id: proposal.id,
       path: file.path,
@@ -360,8 +266,8 @@ export async function POST(request: Request) {
       new_content: file.content,
     }));
 
-  if (changeRows.length) {
-    const { error: changesError } = await supabase.from('file_changes').insert(changeRows);
+  if (changes.length) {
+    const { error: changesError } = await supabase.from('file_changes').insert(changes);
     if (changesError) {
       await supabase.from('proposals').delete().eq('id', proposal.id);
       return NextResponse.json({ error: changesError.message }, { status: 500 });
@@ -374,9 +280,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not update usage.' }, { status: 500 });
   }
 
-  const summary = `Proposal ready: ${changeRows.length} files to modify. [Review Changes]`;
+  const summary = `Proposal ready: ${changes.length} files to modify. [Review Changes]`;
   const { error: messageError } = await supabase.from('messages').insert({ project_id: projectId, user_id: user.id, role: 'assistant', content: summary });
-  if (messageError) return NextResponse.json({ proposalId: proposal.id, changesCount: changeRows.length, warning: 'Proposal created, but the chat summary could not be saved.' });
+  if (messageError) return NextResponse.json({ proposalId: proposal.id, changesCount: changes.length, warning: 'Proposal created, but the chat summary could not be saved.' });
 
-  return NextResponse.json({ proposalId: proposal.id, changesCount: changeRows.length, provider });
+  return NextResponse.json({ proposalId: proposal.id, changesCount: changes.length, provider });
 }
