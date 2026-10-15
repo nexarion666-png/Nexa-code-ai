@@ -6,6 +6,7 @@ import { checkUsageLimit, incrementUsage } from '@/lib/limits';
 import { ensureCompleteNextProject, serializeFileBlocks } from '@/lib/project-completeness';
 import { validateGeneratedSyntax, validateGeneratedTypes } from '@/lib/build-validation';
 import { parseGeneratedFileBlocks } from '@/lib/file-blocks';
+import { formatProjectContext } from '@/lib/project-context';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -13,14 +14,9 @@ export const maxDuration = 300;
 // gets a clean JSON error instead of a 504 FUNCTION_INVOCATION_TIMEOUT.
 const TIME_BUDGET_MS = 270_000;
 
-const SYSTEM = `You are Nexa, senior full-stack dev. Based on conversation, output detailed plan, then output files EXACTLY like:
----FILE: app/page.tsx---
-full file content here
----FILE: lib/utils.ts---
-content
-List ALL files needed for feature. Every local module you import (e.g. @/components/Foo) MUST also be output as its own file block. Production-ready Next.js 14 Tailwind code. No explanation outside file blocks.`;
+const SYSTEM = `You are Nexa, a senior full-stack coding agent modifying an EXISTING project. Read the supplied current files before editing. Choose scope based on the request: for a small bug fix or focused change, modify the minimum necessary files and preserve all unrelated behavior; for a genuinely new feature or broad build request, create or update every file required to make the feature work. Never replace a working file just for convenience. Keep existing framework, package versions, aliases, styling conventions, APIs, and component contracts unless the request requires changing them. Do not invent the contents of files that were not supplied. Every local module you import (e.g. @/components/Foo) MUST exist already or be output as its own file block. Output only changed/new complete file blocks in exactly this format:\n---FILE: app/page.tsx---\nfull file content here\n---FILE: lib/utils.ts---\ncontent\nNo explanation outside file blocks.`;
 
-const GENERATE_NOW = 'The requirements are settled. Do not ask questions and do not write any text outside file blocks. Output the complete set of files now, each starting with a line exactly like ---FILE: path/to/file.tsx--- followed by the full file content.';
+const GENERATE_NOW = 'The requirements are settled. Do not ask questions and do not write any text outside file blocks. Output only the files that genuinely need to be created or changed for this request, each starting with a line exactly like ---FILE: path/to/file.tsx--- followed by the complete contents of that changed file. Do not repeat unchanged files.';
 
 function parseFiles(content: string, fallbackPath?: string) {
   return parseGeneratedFileBlocks(content, fallbackPath);
@@ -163,9 +159,8 @@ export async function POST(request: Request) {
   if (filesError) return NextResponse.json({ error: filesError.message }, { status: 500 });
   const existingFiles: { path: string; content: string | null }[] = existingFilesRaw ?? [];
 
-  const context = existingFiles?.length
-    ? `\n\nExisting project files are listed below. Preserve compatible existing behavior and update files where necessary:\n${existingFiles.map(file => `---EXISTING: ${file.path}---\n${file.content ?? ''}`).join('\n')}`
-    : '';
+  const relevanceText = safeHistory.slice(-12).map(item => item.content).join('\n');
+  const context = formatProjectContext(existingFiles, relevanceText, { maxChars: 36000, maxFiles: 32, perFileChars: 9000 });
   // The chat history ends on an assistant turn (or a conversation-mode message), so tell the
   // model explicitly to emit the file blocks now.
   const lastMessage = safeHistory[safeHistory.length - 1];

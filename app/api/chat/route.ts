@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { decryptApiKey } from '@/lib/ai/crypto';
 import { createStreamingFailover, friendlyFailoverError, parseFailoverError, type AIMessage, type FailoverKey, type Provider } from '@/lib/ai/failover';
 import { checkUsageLimit, incrementUsage } from '@/lib/limits';
+import { formatProjectContext } from '@/lib/project-context';
 
 export const runtime = 'nodejs';
 
@@ -73,17 +74,8 @@ export async function POST(request: Request) {
       .order('path');
     if (projectFilesError) return NextResponse.json({ error: `Could not inspect project files: ${projectFilesError.message}` }, { status: 500 });
     const files = (projectFiles ?? []) as { path: string; content: string | null }[];
-    let remaining = 18000;
-    const selected: string[] = [];
-    for (const file of files) {
-      if (remaining <= 0) break;
-      const block = `---EXISTING FILE: ${file.path}---\\n${(file.content ?? '').slice(0, Math.min(remaining, 5000))}`;
-      selected.push(block);
-      remaining -= block.length;
-    }
-    projectContext = files.length
-      ? `\\n\\nExisting project files for inspection (context may be truncated):\\n${selected.join('\\n\\n')}`
-      : '\\n\\nNo saved project files were found yet. This may be a new project.';
+    const relevanceText = [...safeHistory.slice(-8).map(item => item.content), message].join('\n');
+    projectContext = formatProjectContext(files, relevanceText, { maxChars: 18000, maxFiles: 16, perFileChars: 5000 });
   }
   const systemPrompt = mode === 'agent' ? AGENT_SYSTEM + projectContext : CONVERSATION_SYSTEM;
 
