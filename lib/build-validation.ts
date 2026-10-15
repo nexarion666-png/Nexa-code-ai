@@ -52,7 +52,7 @@ export function validateGeneratedSyntax(files: BuildFile[]) {
  * External package resolution uses NCA's installed types as a best-effort check;
  * missing external modules are handled by validatePackage / the real deployment build.
  */
-export function validateGeneratedTypes(
+function collectTypeDiagnostics(
   generatedFiles: { path: string; content: string }[],
   existingFiles: { path: string; content: string }[],
 ) {
@@ -60,13 +60,22 @@ export function validateGeneratedTypes(
   for (const file of existingFiles) all.set(file.path.replace(/^\.\//, ''), file.content);
   for (const file of generatedFiles) all.set(file.path.replace(/^\.\//, ''), file.content);
 
-  const sourceFiles = [...all.keys()].filter(path => /\.(?:tsx?|jsx?)$/i.test(path));
-  if (!sourceFiles.length) return;
+  const sourceFiles = [...all.keys()].filter(filePath => /\.(?:tsx?|jsx?)$/i.test(filePath));
+  const sourceFileSet = new Set(sourceFiles);
+  if (!sourceFiles.length) return [] as { path: string; code: number; message: string; line: number; column: number }[];
 
   const virtualRoot = '/__nexa_generated_project__';
   const virtualPath = (relative: string) => `${virtualRoot}/${relative.replace(/^\//, '')}`;
-  const virtualContents = new Map([...all.entries()].map(([path, content]) => [virtualPath(path), content]));
+  const virtualContents = new Map([...all.entries()].map(([filePath, content]) => [virtualPath(filePath), content]));
   const configText = all.get('tsconfig.json');
+  let declaredDependencies = new Set<string>();
+  try {
+    const packageJson = JSON.parse(all.get('package.json') ?? '{}');
+    declaredDependencies = new Set([
+      ...Object.keys(packageJson.dependencies ?? {}),
+      ...Object.keys(packageJson.devDependencies ?? {}),
+    ]);
+  } catch { /* Package validation reports malformed JSON separately. */ }
   let config: any = {};
   if (configText) {
     try { config = JSON.parse(configText); } catch { /* validateJson reports this first */ }
@@ -80,15 +89,11 @@ export function validateGeneratedTypes(
     jsx: ts.JsxEmit.Preserve,
     strict: rawOptions.strict !== false,
     skipLibCheck: true,
-    allowJs: sourceFiles.some(path => /\.jsx?$/i.test(path)),
+    allowJs: sourceFiles.some(filePath => /\.jsx?$/i.test(filePath)),
     esModuleInterop: true,
     resolveJsonModule: true,
     ...parsedOptions,
-    // The virtual source tree has no physical node_modules directory. Point global
-    // ambient type discovery at NCA's installed type packages to avoid false JSX
-    // errors merely because generated files live in the virtual filesystem.
     typeRoots: [path.join(process.cwd(), 'node_modules', '@types')],
-    // A generated tsconfig must not be able to emit files or alter the check root.
     noEmit: true,
     incremental: false,
   };
@@ -113,6 +118,9 @@ export function validateGeneratedTypes(
     },
     resolveModuleNames(moduleNames, containingFile) {
       return moduleNames.map(specifier => {
+        // Styles and static assets are handled by the framework bundler, not the
+        // TypeScript source checker. Do not accidentally parse CSS as TypeScript.
+        if (/\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i.test(specifier)) return undefined;
         const normalizedContaining = normalize(containingFile);
         const relative = normalizedContaining.startsWith(`${virtualRoot}/`)
           ? normalizedContaining.slice(virtualRoot.length + 1)
@@ -144,35 +152,75 @@ export function validateGeneratedTypes(
             }
           }
         }
-        // Resolve third-party packages against the installed runtime dependencies.
         const packageContainingFile = `${process.cwd()}/__nexa_generated_project__/${relative}`;
-        const result = ts.resolveModuleName(specifier, packageContainingFile, options, ts.sys).resolvedModule;
-        return result;
+        return ts.resolveModuleName(specifier, packageContainingFile, options, ts.sys).resolvedModule;
       });
     },
   };
-  const roots = sourceFiles.map(virtualPath);
-  const program = ts.createProgram({ rootNames: roots, options, host });
-  const generatedPaths = new Set(generatedFiles.map(file => virtualPath(file.path.replace(/^\.\//, ''))));
-  const diagnostics = ts.getPreEmitDiagnostics(program).filter(diagnostic => {
-    if (diagnostic.category !== ts.DiagnosticCategory.Error) return false;
-    // Missing external package/types are handled by package checks and the real build;
-    // don't let NCA's own dependency tree create false positives for another project.
-    if (diagnostic.code === 2307 || diagnostic.code === 7016 || diagnostic.code === 2688) return false;
-    const diagnosticPath = diagnostic.file ? normalize(diagnostic.file.fileName) : '';
-    return generatedPaths.has(diagnosticPath);
+  const program = ts.createProgram({ rootNames: sourceFiles.map(virtualPath), options, host });
+  return ts.getPreEmitDiagnostics(program)
+    .filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
+    .filter(diagnostic => !diagnostic.file || sourceFileSet.has(normalize(diagnostic.file.fileName).startsWith(`${virtualRoot}/`) ? normalize(diagnostic.file.fileName).slice(virtualRoot.length + 1) : normalize(diagnostic.file.fileName)))
+    .filter(diagnostic => ![2307, 7016, 2688].includes(diagnostic.code))
+    // If @types/react is declared by the generated project but unavailable in
+    // NCA's own install tree, don't misreport the missing ambient React namespace
+    // as a project defect. The isolated/real project build will verify it.
+    .filter(diagnostic => !(declaredDependencies.has('@types/react') && (
+      (diagnostic.code === 2503 && /Cannot find namespace ['\"]React['\"]/.test(ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '))) ||
+      (diagnostic.code === 7026 && /JSX element implicitly has type ['\"]any['\"] because no interface ['\"]JSX\.IntrinsicElements['\"] exists/.test(ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')))
+    )))
+    .map(diagnostic => {
+      const fullPath = diagnostic.file ? normalize(diagnostic.file.fileName) : '';
+      const relativePath = fullPath.startsWith(`${virtualRoot}/`) ? fullPath.slice(virtualRoot.length + 1) : 'project';
+      const position = diagnostic.file && diagnostic.start !== undefined
+        ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+        : null;
+      return {
+        path: relativePath,
+        code: diagnostic.code,
+        message: ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '),
+        line: position ? position.line + 1 : 0,
+        column: position ? position.character + 1 : 0,
+      };
+    });
+}
+
+/**
+ * Type-check the merged project, not only files returned by the model. A changed
+ * shared type can break an unchanged page/component, so diagnostics from every
+ * file are compared against the pre-change baseline. Only newly introduced
+ * errors block a proposal; unrelated legacy errors do not prevent all editing.
+ */
+export function validateGeneratedTypes(
+  generatedFiles: { path: string; content: string }[],
+  existingFiles: { path: string; content: string }[],
+) {
+  const baseline = collectTypeDiagnostics([], existingFiles);
+  const after = collectTypeDiagnostics(generatedFiles, existingFiles);
+  const fingerprint = (diagnostic: { path: string; code: number; message: string }) =>
+    `${diagnostic.path}|TS${diagnostic.code}|${diagnostic.message}`;
+  const generatedPaths = new Set(generatedFiles.map(file => file.path.replace(/^\.\//, '')));
+  const baselineCounts = new Map<string, number>();
+  for (const diagnostic of baseline) {
+    const key = fingerprint(diagnostic);
+    baselineCounts.set(key, (baselineCounts.get(key) ?? 0) + 1);
+  }
+  const introduced = after.filter(diagnostic => {
+    // A generated file must be valid even if the same error already existed in
+    // its previous version. Baseline suppression applies only to untouched files.
+    if (generatedPaths.has(diagnostic.path)) return true;
+    const key = fingerprint(diagnostic);
+    const remaining = baselineCounts.get(key) ?? 0;
+    if (remaining > 0) {
+      baselineCounts.set(key, remaining - 1);
+      return false;
+    }
+    return true;
   });
-  if (!diagnostics.length) return;
-  const diagnostic = diagnostics[0];
-  const relativePath = diagnostic.file
-    ? normalize(diagnostic.file.fileName).slice(virtualRoot.length + 1)
-    : 'project';
-  const position = diagnostic.file && diagnostic.start !== undefined
-    ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
-    : null;
-  const where = position ? `:${position.line + 1}:${position.character + 1}` : '';
-  const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ');
-  throw new Error(`Generated file ${relativePath}${where} has a TypeScript type error (TS${diagnostic.code}): ${message}`);
+  if (!introduced.length) return;
+  const diagnostic = introduced[0];
+  const where = diagnostic.line ? `:${diagnostic.line}:${diagnostic.column}` : '';
+  throw new Error(`Generated project file ${diagnostic.path}${where} has a TypeScript type error (TS${diagnostic.code}): ${diagnostic.message}`);
 }
 
 

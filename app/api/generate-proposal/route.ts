@@ -60,7 +60,7 @@ async function repairGeneratedProject({
   // Repair must be a small, focused request. Re-sending the original generation
   // history + every existing project file can exceed provider TPM/credit limits.
   const missingImportMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+imports missing local module\s+([^\.\s]+(?:\.[^\s]+)*)/i);
-  const syntaxMatch = validationError.match(/Generated file\s+([^\s:]+)(?::\d+:\d+)?\s+has a TypeScript(?:\/JSX syntax| type) error/i);
+  const syntaxMatch = validationError.match(/(?:Generated file|Generated project file)\s+([^\s:]+)(?::\d+:\d+)?\s+has a TypeScript(?:\/JSX syntax| type) error/i);
   const missingFileMatch = validationError.match(/(?:requires|missing|Missing)\s+(?:file\s+)?([^\s,.]+\.(?:tsx?|jsx?|json|css|md))/i);
   const relevantPath = missingImportMatch?.[1] || syntaxMatch?.[1] || missingFileMatch?.[1] || '';
   const missingSpecifier = missingImportMatch?.[2] || '';
@@ -84,7 +84,7 @@ async function repairGeneratedProject({
     content: missingImportMatch
       ? `Fix this missing import only. The file ${missingImportMatch[1]} imports ${missingSpecifier}. Create the real module at the path implied by tsconfig.json (for @/components/CartDrawer, use components/CartDrawer.tsx or the appropriate existing extension). Infer the component's props and behavior from the importing file and relevant project context. Do not regenerate the importing page unless it is genuinely necessary. Output only the missing/changed complete FILE block(s):\n---FILE: path/to/file.tsx---\nfull file content`
       : syntaxMatch
-        ? `Repair the TypeScript syntax/type error in ${syntaxMatch[1]} only. The exact compiler diagnostic is: ${validationError}. Inspect the complete current file and related shared types/interfaces/data models. Fix the underlying contract consistently; do not hide the error with any, ts-ignore, or disabled checks. Preserve design and behavior. Output complete FILE blocks only for files that genuinely need changes.`
+        ? `Repair the TypeScript syntax/type error affecting ${syntaxMatch[1]}. The exact compiler diagnostic is: ${validationError}. Inspect the complete failing file plus its imported source files and related shared types/interfaces/data models. The root cause may be in a dependency rather than the file named by the diagnostic. Fix the underlying contract consistently; do not hide the error with any, ts-ignore, or disabled checks. Preserve design and behavior. Output complete FILE blocks for every file that genuinely needs changes.`
       : needsProjectShell
         ? `Complete the required Next.js project shell in ONE repair response. Inspect the CURRENT FILES and create every missing required file in this same response: package.json with Next.js and all packages imported by generated files, a real app/page.tsx (or pages/index.tsx if the project uses Pages Router), and app/layout.tsx when using App Router. Preserve the existing design and feature requirements; do not create a fake placeholder homepage. Do not repeat files that already exist unless they need a compatible update. Output only complete FILE blocks.`
         : `Fix only the validation error. Create the real required file(s), preserve project conventions, and do not regenerate unrelated files. Output only complete FILE blocks:\n---FILE: path/to/file.tsx---\nfull file content`,
@@ -207,6 +207,10 @@ export async function POST(request: Request) {
     try {
       files = ensureCompleteNextProject(files, { existingFiles: existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })) });
       validateGeneratedSyntax(files);
+      validateGeneratedTypes(
+        files,
+        existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })),
+      );
       validationError = '';
       break;
     } catch (error) {
@@ -221,15 +225,45 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: validationError, code: 'PROPOSAL_VALIDATION_FAILED', message: 'Ran out of time repairing the proposal. Try again, or ask Nexa for a smaller feature.' }, { status: 422 });
       }
       try {
+        const currentByPath = new Map<string, { path: string; content: string }>();
+        existingFiles.forEach(file => currentByPath.set(file.path, { path: file.path, content: file.content ?? '' }));
+        files.forEach(file => currentByPath.set(file.path, file));
+        const currentProjectFiles = [...currentByPath.values()];
+        const diagnosticPath = validationError.match(/(?:Generated file|Generated project file)\s+([^\s:]+)(?::\d+:\d+)?/)?.[1] ?? '';
+        const diagnosticBase = diagnosticPath.split('/').slice(0, -1).join('/');
+        const likelySharedSymbols = /\b(?:Shoe|Product|User|CartItem|Order|Category|Props|type|interface)\b/;
+        const diagnosticFile = currentProjectFiles.find(file => file.path === diagnosticPath);
+        const importedByDiagnostic = diagnosticFile
+          ? currentProjectFiles.filter(file => {
+              const stem = diagnosticPath.replace(/\.(?:tsx?|jsx?)$/i, '').replace(/^src\//, '');
+              const normalizedStem = stem.startsWith('lib/') ? stem.slice(4) : stem;
+              return file.path !== diagnosticPath && (file.content.includes(`@/${normalizedStem}`) || file.content.includes(`@/${stem}`) || file.content.includes(`./${diagnosticPath.split('/').pop()?.replace(/\.(?:tsx?|jsx?)$/i, '')}`));
+            })
+          : [];
+        const importedByFailingFile = diagnosticFile
+          ? [...diagnosticFile.content.matchAll(/(?:\bfrom\s*|\bimport\s*)['"]([^'"]+)['"]/g)]
+              .map(match => match[1])
+              .filter(specifier => specifier.startsWith('@/') || specifier.startsWith('./') || specifier.startsWith('../'))
+              .flatMap(specifier => {
+                const base = specifier.startsWith('@/') ? specifier.slice(2) : `${diagnosticBase}/${specifier}`;
+                const normalized = base.replace(/\\/g, '/').replace(/\/\.\//g, '/');
+                const candidates = [normalized, ...['.ts', '.tsx', '.js', '.jsx', '.json'].map(ext => `${normalized}${ext}`), ...['index.ts', 'index.tsx', 'index.js', 'index.jsx'].map(index => `${normalized}/${index}`)];
+                return currentProjectFiles.filter(file => candidates.includes(file.path));
+              })
+          : [];
+        const repairContextFiles = currentProjectFiles.filter(file =>
+          file.path === diagnosticPath ||
+          file.path === 'package.json' || file.path === 'tsconfig.json' ||
+          (diagnosticBase && file.path.startsWith(`${diagnosticBase}/`)) ||
+          importedByDiagnostic.includes(file) || importedByFailingFile.includes(file) ||
+          (/\.(?:tsx?|jsx?)$/i.test(file.path) && likelySharedSymbols.test(file.content) && /(?:data|types|models?)\.(?:tsx?|jsx?)$/i.test(diagnosticPath))
+        );
+        const selectedContext = repairContextFiles.length ? repairContextFiles : currentProjectFiles.filter(file => file.path === diagnosticPath || /(^|\/)(types|data|models?|utils)\.(?:tsx?|jsx?)$/.test(file.path));
         const repairedFiles = await repairGeneratedProject({
           deadline,
           provider: usedProvider,
           keysByProvider: failoverKeysByProvider,
-          currentFiles: [
-            ...existingFiles.map(file => ({ path: file.path, content: file.content ?? '' })),
-            ...files.filter(file => !existingFiles.some(existing => existing.path === file.path)),
-            ...files.filter(file => existingFiles.some(existing => existing.path === file.path)),
-          ],
+          currentFiles: selectedContext.length ? selectedContext : currentProjectFiles.slice(0, 12),
           validationError,
         });
         if (!repairedFiles.length) throw new Error('Repair provider returned no file blocks.');

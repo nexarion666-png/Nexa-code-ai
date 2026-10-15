@@ -4,14 +4,14 @@ This update adds static build preflight and deployment-log diagnostics to the ex
 
 ## What it does
 
-- Runs cross-file TypeScript checking during generated proposal validation, in addition to TS/JS/JSX syntax checks.
+- Runs cross-file TypeScript checking during generated proposal validation, in addition to TS/JS/JSX syntax checks. The merged virtual project is checked, so a change to a shared type can flag errors in dependent files that the model did not regenerate. Errors already present in untouched files are baseline-compared so unrelated legacy problems do not block every edit; generated files themselves must still pass.
 - Uses focused AI repair attempts when generated proposal validation detects a problem; it asks the model to repair the underlying type contract rather than suppress errors.
 - Adds `POST /api/validate-build`, which checks the authenticated user's project before deployment.
 - Runs the same preflight inside the Vercel deployment endpoint, so invalid project paths, missing Next.js shell files, malformed JSON, missing local imports, obvious undeclared dependencies, syntax errors, and detected cross-file type errors block deployment submission.
 - Adds `GET /api/deploy/vercel/logs`, which retrieves the latest deployment's build logs through Vercel's deployment-events API.
 - When Vercel confirms a build failure, Nexa can use those logs to prepare a targeted AI repair proposal. The repair is statically validated and saved as a pending proposal; it is **not applied automatically**. The user must review and approve the changes. Existing pending proposals are reused to avoid duplicate repair proposals.
 - Shows a separate “Run Static Build Checks” action and includes relevant Vercel log lines in the deployment error message when available.
-- Adds `npm run test:build-validation`, a small regression suite for valid projects, missing cross-file properties, unsafe paths, malformed JSON, and undeclared dependencies.
+- Adds `npm run test:build-validation`, a regression suite for valid projects, missing cross-file properties (including unchanged dependents), malformed string literals, CSS import handling, unsafe paths, malformed JSON, and undeclared dependencies.
 
 ## Important limits
 

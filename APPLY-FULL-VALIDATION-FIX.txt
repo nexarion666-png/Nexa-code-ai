@@ -1,0 +1,29 @@
+NEXA CODE AI — FULL GENERATION VALIDATION FIX
+
+Apply this ZIP to the root of your existing Nexa Code AI repository. The ZIP contains only the changed files and uses their correct relative paths; there is no outer project folder.
+
+Files included:
+- app/api/generate-proposal/route.ts
+- lib/build-validation.ts
+- scripts/test-build-validation.cjs
+- BUILD-RELIABILITY.md
+
+What this fixes:
+1. Proposal generation runs syntax validation AND cross-file TypeScript validation before saving a proposal.
+2. Type checks run against the merged project, so changing a shared data/type file can reveal errors in unchanged components/pages.
+3. Existing baseline errors in untouched files do not automatically block every edit, but generated files cannot inherit a baseline exemption.
+4. Repair prompts include the failing file and relevant imported/shared files and ask for the underlying contract to be fixed rather than suppressing the error.
+5. Unterminated string literals and similar syntax errors are regression-tested.
+6. CSS/static assets are not parsed as TypeScript source.
+
+Apply steps (Android/GitHub upload workflow):
+1. Back up the current repository/branch.
+2. Extract this ZIP into the repository root, allowing the three code/test files and the reliability document to be replaced. Do not upload the ZIP itself as a project file.
+3. Run `npm run test:build-validation`.
+4. Run `npm run build` and make sure the NCA app itself builds successfully.
+5. Deploy NCA, then test Agent mode on a project with a deliberately invalid type property and a malformed string. Confirm NCA attempts repair and refuses to save a proposal while validation still fails.
+
+Important:
+- This is static validation, not a guarantee that every generated project will deploy. The generated project's own dependency versions and environment variables still matter.
+- Do not claim a project is production-build verified unless its actual production build ran successfully.
+- The NCA app's full `npm run build` was not run in this packaging environment because its dependencies are not installed here. The included regression tests and syntax checks were run successfully.
