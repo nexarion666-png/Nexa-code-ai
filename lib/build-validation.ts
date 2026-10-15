@@ -2,6 +2,21 @@ import ts from 'typescript';
 import path from 'node:path';
 import { ensureCompleteNextProject, type ProjectFile } from '@/lib/project-completeness';
 
+function getVirtualScriptExtension(filePath: string): ts.Extension {
+  const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+  if (normalized.endsWith('.d.ts')) return ts.Extension.Dts;
+  if (normalized.endsWith('.tsx')) return ts.Extension.Tsx;
+  if (normalized.endsWith('.ts')) return ts.Extension.Ts;
+  if (normalized.endsWith('.jsx')) return ts.Extension.Jsx;
+  if (normalized.endsWith('.js')) return ts.Extension.Js;
+  if (normalized.endsWith('.json')) return ts.Extension.Json;
+  if (normalized.endsWith('.mts')) return ts.Extension.Mts;
+  if (normalized.endsWith('.cts')) return ts.Extension.Cts;
+  if (normalized.endsWith('.mjs')) return ts.Extension.Mjs;
+  if (normalized.endsWith('.cjs')) return ts.Extension.Cjs;
+  return ts.Extension.Ts;
+}
+
 export type BuildFile = { path: string; content: string };
 
 /** Fast syntax validation. This catches malformed TS/JS/JSX without emitting output. */
@@ -126,7 +141,7 @@ export function validateGeneratedTypes(
           for (const extension of extensions) {
             const resolved = virtualPath(`${clean}${extension}`);
             if (virtualContents.has(resolved)) {
-              return { resolvedFileName: resolved, extension: ts.extensionFromPath(resolved) };
+              return { resolvedFileName: resolved, extension: getVirtualScriptExtension(resolved) };
             }
           }
         }
