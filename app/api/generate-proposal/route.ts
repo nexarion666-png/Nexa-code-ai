@@ -73,7 +73,7 @@ async function repairGeneratedProject({
   // Start with the provider that generated the files, then use at most one configured
   // alternate provider if its repair response cannot be parsed.
   const repairProviders: Provider[] = [provider, ...providerOrder, 'cleanapis', 'gemini', 'groq', 'openrouter']
-    .filter((candidate, index, all): candidate is Provider => all.indexOf(candidate) === index && candidate !== provider && (keysByProvider[candidate] ?? []).length > 0);
+    .filter((candidate, index, all): candidate is Provider => all.indexOf(candidate) === index && candidate !== provider && (keysByProvider[candidate as Provider] ?? []).length > 0);
   repairProviders.unshift(provider);
   const fallbackPath = relevantPath || syntaxMatch?.[1] || '';
   let lastResponse = '';
