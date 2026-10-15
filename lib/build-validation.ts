@@ -81,7 +81,6 @@ export function validateGeneratedTypes(
     strict: rawOptions.strict !== false,
     skipLibCheck: true,
     allowJs: sourceFiles.some(path => /\.jsx?$/i.test(path)),
-    noEmit: true,
     esModuleInterop: true,
     resolveJsonModule: true,
     ...parsedOptions,
